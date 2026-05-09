@@ -295,6 +295,37 @@ function compactToolArgsPreview(args: unknown): string {
   }
 }
 
+/**
+ * Three dots with staggered bounce for “agent still working” in the composer strip.
+ */
+function AgentWorkingDots({ className }: { className?: string }) {
+  const dot =
+    "inline-block h-1.5 w-1.5 rounded-full bg-current animate-bounce [animation-duration:0.55s]";
+  return (
+    <span className={`inline-flex h-4 shrink-0 items-end gap-[3px] ${className ?? ""}`} aria-hidden>
+      <span className={`${dot} [animation-delay:0ms]`} />
+      <span className={`${dot} [animation-delay:120ms]`} />
+      <span className={`${dot} [animation-delay:240ms]`} />
+    </span>
+  );
+}
+
+function AgentWorkingComposerStrip() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="flex w-full items-center gap-2 rounded-xl border border-primary/30 bg-primary-container/95 px-3 py-2.5 text-[12px] font-semibold leading-snug text-primary shadow-md backdrop-blur-sm"
+    >
+      <AgentWorkingDots className="text-primary" />
+      <span>
+        Agent is working — you can keep this tab open; replies and tool output appear here when ready.
+      </span>
+    </div>
+  );
+}
+
 /** Chevron-down used after “Thought”; rotates 180° when `<details>` is open. */
 function ThoughtDropdownChevron({ className }: { className?: string }) {
   return (
@@ -359,13 +390,13 @@ function CipherStrikeClaudePromptBox({
   };
 
   const pillBase =
-    "inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-left text-[12px] font-semibold shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-primary/30 sm:gap-2 sm:text-[13px]";
+    "inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2.5 py-1.5 text-left text-[11px] font-semibold shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-primary/30 sm:gap-1.5 sm:px-3 sm:py-1.5 sm:text-[12px]";
 
   return (
-    <div className="rounded-[1.75rem] border border-outline-variant/55 bg-surface-container-lowest shadow-[0_22px_56px_-30px_rgba(49,39,89,0.42),inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-black/[0.05] transition-colors focus-within:border-primary/40 focus-within:shadow-[0_26px_60px_-28px_rgba(49,39,89,0.52),0_0_0_3px_rgba(104,76,182,0.11)] focus-within:ring-primary/20 sm:rounded-[2rem]">
-      <div className="relative overflow-hidden rounded-t-[1.75rem] sm:rounded-t-[2rem]">
+    <div className="rounded-[1.25rem] border border-outline-variant/55 bg-surface-container-lowest shadow-[0_14px_40px_-24px_rgba(49,39,89,0.38),inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-black/[0.04] transition-colors focus-within:border-primary/40 focus-within:shadow-[0_18px_44px_-22px_rgba(49,39,89,0.48),0_0_0_2px_rgba(104,76,182,0.1)] focus-within:ring-primary/18 sm:rounded-[1.4rem]">
+      <div className="relative overflow-hidden rounded-t-[1.25rem] sm:rounded-t-[1.4rem]">
         <div
-          className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[5.25rem] bg-gradient-to-b from-primary/[0.09] via-primary/[0.03] to-transparent sm:h-[6rem]"
+          className="pointer-events-none absolute inset-x-0 top-0 z-0 h-12 bg-gradient-to-b from-primary/[0.07] via-primary/[0.02] to-transparent sm:h-14"
           aria-hidden
         />
         <label htmlFor={textareaId} className="sr-only">
@@ -374,17 +405,17 @@ function CipherStrikeClaudePromptBox({
         <textarea
           ref={textareaRef}
           id={textareaId}
-          rows={4}
+          rows={3}
           value={prompt}
           onChange={(e) => onPromptChange(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={PROMPT_INPUT_PLACEHOLDER}
-          className="relative z-[1] min-h-[7.25rem] w-full resize-none bg-transparent px-5 pb-2 pt-5 text-[15px] leading-relaxed text-on-surface placeholder:font-medium placeholder:text-on-surface-variant/48 focus:outline-none focus:ring-0 sm:min-h-[7.75rem]"
+          className="relative z-[1] min-h-[4.5rem] w-full resize-none bg-transparent px-3.5 pb-1.5 pt-3.5 text-[14px] leading-snug text-on-surface placeholder:font-medium placeholder:text-on-surface-variant/48 focus:outline-none focus:ring-0 sm:min-h-[5rem] sm:px-4 sm:pt-4"
         />
       </div>
-      <div className="relative z-20 flex items-center justify-between gap-2 overflow-visible rounded-b-[1.75rem] border-t border-outline-variant/55 bg-surface-container-low/95 px-2.5 py-2.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-3 sm:rounded-b-[2rem] sm:px-4 sm:py-3">
+      <div className="relative z-20 flex items-center justify-between gap-1.5 overflow-visible rounded-b-[1.25rem] border-t border-outline-variant/55 bg-surface-container-low/95 px-2 py-1.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-2 sm:rounded-b-[1.4rem] sm:px-3 sm:py-2">
         <div
-          className="-mx-0.5 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-0.5 [scrollbar-width:none] sm:gap-2.5 [&::-webkit-scrollbar]:hidden"
+          className="-mx-0.5 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto px-0.5 [scrollbar-width:none] sm:gap-2 [&::-webkit-scrollbar]:hidden"
           role="toolbar"
           aria-label="Prompt attachments"
         >
@@ -394,7 +425,7 @@ function CipherStrikeClaudePromptBox({
             aria-label="Focus mission prompt"
             className={`${pillBase} items-center border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/55`}
           >
-            <MaterialSymbol name="smart_toy" className="text-[18px] text-primary" filled />
+            <MaterialSymbol name="smart_toy" className="text-[16px] text-primary" filled />
             <span>Agent</span>
           </button>
           <button
@@ -409,16 +440,16 @@ function CipherStrikeClaudePromptBox({
                 : "bg-surface-container-high/90 text-on-surface"
             }`}
           >
-            <MaterialSymbol name="build" className="text-[18px] opacity-[0.92]" aria-hidden filled />
+            <MaterialSymbol name="build" className="text-[16px] opacity-[0.92]" aria-hidden filled />
             <span className="whitespace-nowrap">Tool</span>
             {explicitToolNamesCount ? (
-              <span className="rounded-full bg-primary/18 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-primary">
+              <span className="rounded-full bg-primary/18 px-1 py-0.5 text-[9px] font-bold tabular-nums text-primary sm:px-1.5 sm:text-[10px]">
                 {explicitToolNamesCount}
               </span>
             ) : null}
           </button>
         </div>
-        <div className="flex shrink-0 items-center gap-2 sm:gap-2.5">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <AgentChatExecModeDropdown
             compact
             menuAlign="end"
@@ -432,16 +463,16 @@ function CipherStrikeClaudePromptBox({
             disabled={sendButtonDisabled}
             aria-label={isSending ? "Executing" : "Execute"}
             aria-busy={isSending}
-            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/35 ${
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/35 ${
               isSending || prompt.trim()
-                ? "bg-primary text-on-primary shadow-[0_4px_14px_-6px_rgba(104,76,182,0.65)] hover:opacity-[0.93]"
+                ? "bg-primary text-on-primary shadow-[0_3px_12px_-5px_rgba(104,76,182,0.6)] hover:opacity-[0.93]"
                 : "cursor-not-allowed bg-surface-container-high text-on-surface-variant ring-1 ring-outline-variant/85"
             }`}
           >
             {isSending ? (
-              <Loader2 className="size-[1.125rem] animate-spin stroke-[2.75]" aria-hidden stroke="currentColor" />
+              <Loader2 className="size-4 animate-spin stroke-[2.5]" aria-hidden stroke="currentColor" />
             ) : (
-              <ArrowUp className="size-[1.125rem] stroke-[2.75]" aria-hidden stroke="currentColor" />
+              <ArrowUp className="size-4 stroke-[2.5]" aria-hidden stroke="currentColor" />
             )}
           </button>
         </div>
@@ -1638,20 +1669,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                                     />
                                   </div>
                                 ) : null}
-                                {isRunActive ? (
-                                  <p className="mt-2 flex items-start gap-2 rounded-lg bg-primary/10 px-2 py-1.5 text-[11px] leading-snug text-primary ring-1 ring-primary/15">
-                                    <Loader2
-                                      className="mt-0.5 size-3.5 shrink-0 animate-spin"
-                                      aria-hidden
-                                      strokeWidth={2.5}
-                                    />
-                                    <span>
-                                      Still running on the agent — this can take a while. Expand{" "}
-                                      <span className="font-semibold">Execution log</span> to watch output; the panel
-                                      updates on its own.
-                                    </span>
-                                  </p>
-                                ) : null}
                                 <BatchExecLogPanel slot={mergedSingle} />
                                 {awaitingApproval && !isTenantAdmin ? (
                                   <p className="mt-2 text-[11px] text-on-surface-variant">
@@ -1699,19 +1716,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       <span className="mt-0.5 inline-block h-3 w-1 animate-pulse rounded-full bg-primary align-middle" />
                     </div>
                   ) : null}
-                  {agentActivelyWorking ? (
-                    <div
-                      role="status"
-                      aria-live="polite"
-                      aria-atomic="true"
-                      className="sticky bottom-0 z-[15] mx-auto mt-3 flex w-full max-w-[min(100%,48rem)] items-center gap-2 rounded-xl border border-primary/30 bg-primary-container/95 px-3 py-2.5 text-[12px] font-semibold leading-snug text-primary shadow-md backdrop-blur-sm sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]"
-                    >
-                      <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden strokeWidth={2.5} />
-                      <span>
-                        Agent is working — you can keep this tab open; replies and tool output appear here when ready.
-                      </span>
-                    </div>
-                  ) : null}
                   <div ref={bottomRef} />
                 </div>
               )}
@@ -1732,6 +1736,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
             {hasThread ? (
               <div className="shrink-0 border-t border-outline-variant/50 px-3 py-4 sm:px-5 sm:py-5 lg:px-7">
+                {agentActivelyWorking ? (
+                  <div className="mx-auto mb-2 w-[min(100%,60%)] min-w-0">
+                    <AgentWorkingComposerStrip />
+                  </div>
+                ) : null}
                 <div className="mx-auto w-[min(100%,60%)] min-w-0">
                   <CipherStrikeClaudePromptBox
                     textareaId="offensive-prompt"
@@ -1752,6 +1761,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
           {!hasThread ? (
           <div className="mx-auto w-[min(100%,60%)] min-w-0 shrink-0 px-1 pb-0 pt-3">
+            {agentActivelyWorking ? (
+              <div className="mb-2">
+                <AgentWorkingComposerStrip />
+              </div>
+            ) : null}
             <CipherStrikeClaudePromptBox
               textareaId="offensive-prompt-empty"
               prompt={prompt}
