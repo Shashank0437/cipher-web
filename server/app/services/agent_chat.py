@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -15,7 +16,11 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import Settings
-from app.constants import AGENT_CHAT_MESSAGES_COLLECTION, AGENT_CHAT_SESSIONS_COLLECTION
+from app.constants import (
+    AGENT_CHAT_ATTACHMENTS_COLLECTION,
+    AGENT_CHAT_MESSAGES_COLLECTION,
+    AGENT_CHAT_SESSIONS_COLLECTION,
+)
 from app.redis_client import get_redis
 from app.services.agent_client import (
     AgentUnreachableError,
@@ -31,6 +36,8 @@ from app.services.agent_client import (
 from app.services.tool_run_stream import drain_tool_run_stream
 
 logger = logging.getLogger(__name__)
+
+PENETRATION_REPORT_TOOL_NAME = "penetration-report"
 
 _MAX_AGENT_CHAT_THINKING_CHARS = 100_000
 _MAX_LLM_TOOL_SCHEMAS_STORE_BYTES = 400_000
@@ -338,6 +345,7 @@ _CHAT_ROUTING_CATEGORY_SLUGS = frozenset(
         "database",
         "active_directory",
         "vulnerability_intelligence",
+        "reporting",
     },
 )
 
@@ -476,6 +484,16 @@ _OPERATIONAL_SECURITY_HINTS = (
     " sqlmap",
     " nikto",
     " whatweb",
+    "create a report",
+    "generate report",
+    "pdf report",
+    "penetration test report",
+    "penetration report",
+    "security report",
+    "executive summary",
+    "write up the findings",
+    "write-up",
+    "export report",
 )
 
 _FALLBACK_SECURITY_TOOLS_ORDER = (
@@ -644,6 +662,9 @@ async def delete_session(
     user_id: ObjectId,
     session_id: ObjectId,
 ) -> bool:
+    await db[AGENT_CHAT_ATTACHMENTS_COLLECTION].delete_many(
+        {"session_id": session_id, "organization_id": organization_id, "user_id": user_id},
+    )
     await db[AGENT_CHAT_MESSAGES_COLLECTION].delete_many(
         {"session_id": session_id, "organization_id": organization_id, "user_id": user_id},
     )
@@ -658,6 +679,179 @@ async def touch_session(db: AsyncIOMotorDatabase, session_id: ObjectId) -> None:
         {"_id": session_id},
         {"$set": {"updated_at": _utc_now()}},
     )
+
+
+async def touch_session_ui_context(
+    db: AsyncIOMotorDatabase,
+    session_id: ObjectId,
+    ctx: dict[str, Any] | None,
+) -> None:
+    """Persist last dashboard context (page, workspace session_id) for report generation."""
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": session_id},
+        {"$set": {"last_ui_context": ctx or {}, "updated_at": _utc_now()}},
+    )
+
+
+def _build_report_transcript_for_chat(
+    rows: list[dict[str, Any]],
+    *,
+    max_chars: int,
+) -> tuple[str, bool]:
+    """Serialize messages for penetration-report; head+tail if over max_chars."""
+    parts: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "?")
+        content = str(row.get("content") or "")
+        parts.append(f"## {role}\n{content}")
+    full = "\n\n".join(parts)
+    if len(full) <= max_chars:
+        return full, False
+    out, _ = _head_tail_truncate(full, max_chars=max_chars, head_fraction=0.22)
+    return out, True
+
+
+async def enrich_penetration_report_tool_args(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(args) if isinstance(args, dict) else {}
+    sess = await get_session_owned(
+        db, organization_id=organization_id, user_id=user_id, session_id=session_id
+    )
+    summary = str((sess or {}).get("conversation_summary") or "").strip()
+    ctx_raw = (sess or {}).get("last_ui_context")
+    ui_ctx = context_snippet(ctx_raw if isinstance(ctx_raw, dict) else None) or ""
+
+    rows = await list_messages(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+        limit=200,
+    )
+    main, truncated = _build_report_transcript_for_chat(
+        rows,
+        max_chars=int(getattr(settings, "agent_chat_report_transcript_max_chars", 200_000) or 200_000),
+    )
+    blocks: list[str] = []
+    if summary:
+        blocks.append("## Rolling summary (compressed earlier thread)\n" + summary)
+    blocks.append("## Full message log\n" + main)
+    transcript = "\n\n".join(blocks)
+    if truncated:
+        transcript += "\n\n[Note: message log exceeded size budget; middle section omitted via head/tail.]\n"
+
+    out["session_transcript"] = transcript
+    if ui_ctx:
+        out["ui_context"] = ui_ctx
+    return out
+
+
+async def persist_agent_chat_pdf_attachment(
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+    filename: str,
+    pdf_bytes: bytes,
+) -> ObjectId:
+    doc: dict[str, Any] = {
+        "organization_id": organization_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "filename": (filename or "report.pdf").strip() or "report.pdf",
+        "content_type": "application/pdf",
+        "data": pdf_bytes,
+        "created_at": _utc_now(),
+    }
+    res = await db[AGENT_CHAT_ATTACHMENTS_COLLECTION].insert_one(doc)
+    return res.inserted_id
+
+
+async def get_agent_chat_attachment_owned(
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+    attachment_id: ObjectId,
+) -> dict[str, Any] | None:
+    return await db[AGENT_CHAT_ATTACHMENTS_COLLECTION].find_one(
+        {
+            "_id": attachment_id,
+            "session_id": session_id,
+            "organization_id": organization_id,
+            "user_id": user_id,
+        }
+    )
+
+
+def attachments_from_tool_result_json(result_text: str) -> list[dict[str, Any]] | None:
+    try:
+        obj = json.loads(result_text)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    aid = obj.get("attachment_id")
+    fn = obj.get("filename")
+    if aid and fn:
+        return [
+            {
+                "id": str(aid),
+                "filename": str(fn),
+                "content_type": "application/pdf",
+            }
+        ]
+    return None
+
+
+async def _strip_store_report_pdf_after_agent_json(
+    result_obj: Any,
+    *,
+    tool_name: str,
+    chat_tool_context: tuple[AsyncIOMotorDatabase, ObjectId, ObjectId, ObjectId] | None,
+    http_status: int,
+) -> None:
+    if (
+        http_status >= 400
+        or tool_name != PENETRATION_REPORT_TOOL_NAME
+        or not isinstance(result_obj, dict)
+        or not result_obj.get("success")
+    ):
+        return
+    b64 = result_obj.get("pdf_base64")
+    if not isinstance(b64, str) or not b64.strip():
+        return
+    try:
+        raw_pdf = base64.b64decode(b64.strip())
+    except Exception:
+        result_obj.pop("pdf_base64", None)
+        return
+    result_obj.pop("pdf_base64", None)
+    if not chat_tool_context or not raw_pdf:
+        return
+    db, organization_id, user_id, session_id = chat_tool_context
+    fn = str(result_obj.get("filename") or "penetration_report.pdf").strip() or "penetration_report.pdf"
+    try:
+        aid = await persist_agent_chat_pdf_attachment(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            filename=fn,
+            pdf_bytes=raw_pdf,
+        )
+        result_obj["attachment_id"] = str(aid)
+    except Exception:
+        logger.exception("agent_chat: failed to persist penetration-report PDF")
 
 
 async def insert_message(
@@ -675,6 +869,7 @@ async def insert_message(
     thinking_content: str | None = None,
     routing: dict[str, Any] | None = None,
     llm_tool_schemas: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> ObjectId:
     doc: dict[str, Any] = {
         "organization_id": organization_id,
@@ -699,6 +894,8 @@ async def insert_message(
     tc_store = _trim_thinking_for_store(thinking_content)
     if tc_store is not None:
         doc["thinking_content"] = tc_store
+    if attachments:
+        doc["attachments"] = attachments
     res = await db[AGENT_CHAT_MESSAGES_COLLECTION].insert_one(doc)
     await touch_session(db, session_id)
     return res.inserted_id
@@ -1437,6 +1634,8 @@ async def _run_one_tool_detailed(
     *,
     emit_slot_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     progress_context: dict[str, Any] | None = None,
+    chat_tool_context: tuple[AsyncIOMotorDatabase, ObjectId, ObjectId, ObjectId] | None = None,
+    enrichment_tool_name: str = "",
 ) -> tuple[str, dict[str, Any], int]:
     """Run one catalog tool via agent HTTP; returns (json_for_llm, progress_fields_for_slot, http_status_code).
 
@@ -1459,6 +1658,21 @@ async def _run_one_tool_detailed(
         }
         return json.dumps(err_obj), meta, 403
 
+    args = dict(args) if isinstance(args, dict) else {}
+    tn = enrichment_tool_name.strip()
+    if not tn and isinstance(progress_context, dict):
+        tn = str(progress_context.get("tool_name") or "").strip()
+    if chat_tool_context and tn == PENETRATION_REPORT_TOOL_NAME:
+        db_ctx, organization_id, user_id, session_id = chat_tool_context
+        args = await enrich_penetration_report_tool_args(
+            settings,
+            db_ctx,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            args=args,
+        )
+
     use_live = (
         emit_slot_progress is not None
         and isinstance(progress_context, dict)
@@ -1473,6 +1687,12 @@ async def _run_one_tool_detailed(
         except Exception:
             raw = content.decode("utf-8", errors="replace")
             result_obj = {"http_status": status_code, "raw": raw}
+        await _strip_store_report_pdf_after_agent_json(
+            result_obj,
+            tool_name=tn,
+            chat_tool_context=chat_tool_context,
+            http_status=status_code,
+        )
         result_text = _prepare_agent_tool_result_for_llm(settings, result_obj, status_code)
         meta = _progress_from_completed_run(status_code, result_obj)
         return result_text, meta, status_code
@@ -1563,6 +1783,12 @@ async def _run_one_tool_detailed(
     except Exception:
         raw = content.decode("utf-8", errors="replace")
         result_obj = {"http_status": status_code, "raw": raw}
+    await _strip_store_report_pdf_after_agent_json(
+        result_obj,
+        tool_name=tn,
+        chat_tool_context=chat_tool_context,
+        http_status=status_code,
+    )
     result_text = _prepare_agent_tool_result_for_llm(settings, result_obj, status_code)
     meta = _progress_from_completed_run(status_code, result_obj)
     return result_text, meta, status_code
@@ -1572,8 +1798,17 @@ async def _run_one_tool(
     settings: Settings,
     endpoint: str,
     args: dict[str, Any],
+    *,
+    chat_tool_context: tuple[AsyncIOMotorDatabase, ObjectId, ObjectId, ObjectId] | None = None,
+    enrichment_tool_name: str = "",
 ) -> str:
-    text, _meta, _status = await _run_one_tool_detailed(settings, endpoint, args)
+    text, _meta, _status = await _run_one_tool_detailed(
+        settings,
+        endpoint,
+        args,
+        chat_tool_context=chat_tool_context,
+        enrichment_tool_name=enrichment_tool_name,
+    )
     return text
 
 
@@ -1717,6 +1952,8 @@ async def execute_tool_slots_follow_up(
                     "tool_name": tn,
                     "started_at": started,
                 },
+                chat_tool_context=(db, organization_id, user_id, session_id),
+                enrichment_tool_name=tn,
             )
         except Exception as exc:
             logger.exception("batch tool %s", tn)
@@ -1891,6 +2128,7 @@ async def execute_tool_slots_follow_up(
             f"Arguments: `{json.dumps(args)}`\n"
             f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
         )
+        att = attachments_from_tool_result_json(result_text)
         await insert_message(
             db,
             organization_id=organization_id,
@@ -1898,6 +2136,7 @@ async def execute_tool_slots_follow_up(
             session_id=session_id,
             role="assistant",
             content=exec_record,
+            attachments=att,
         )
         await insert_message(
             db,
@@ -1992,7 +2231,13 @@ async def _auto_execute_single_tool_sse(
         return
 
     try:
-        result_text = await _run_one_tool(settings, endpoint, args)
+        result_text = await _run_one_tool(
+            settings,
+            endpoint,
+            args,
+            chat_tool_context=(db, organization_id, user_id, session_id),
+            enrichment_tool_name=tool_name,
+        )
     except Exception as exc:
         logger.exception("auto single tool %s", tool_name)
         result_text = json.dumps({"error": str(exc)})
@@ -2002,6 +2247,7 @@ async def _auto_execute_single_tool_sse(
         f"Arguments: `{json.dumps(args)}`\n"
         f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
     )
+    att = attachments_from_tool_result_json(result_text)
     await insert_message(
         db,
         organization_id=organization_id,
@@ -2009,6 +2255,7 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         role="assistant",
         content=exec_record,
+        attachments=att,
     )
     await insert_message(
         db,

@@ -85,6 +85,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_CHAT_TOOL_RESULT_MAX_CHARS"),
     )
 
+    # Max characters of chat message log injected into penetration-report tool (head+tail if exceeded).
+    agent_chat_report_transcript_max_chars: int = Field(
+        default=200_000,
+        ge=20_000,
+        le=900_000,
+        validation_alias=AliasChoices("AGENT_CHAT_REPORT_TRANSCRIPT_MAX_CHARS"),
+    )
+
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (
         "You are CipherStrike, an expert penetration testing AI assistant. "

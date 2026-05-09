@@ -48,6 +48,12 @@ export type AgentChatBatchSlot = {
   run_finished_at?: string | null;
 };
 
+export type AgentChatAttachment = {
+  id: string;
+  filename: string;
+  content_type?: string;
+};
+
 export type AgentChatMessage = {
   id: string;
   role: string;
@@ -62,6 +68,7 @@ export type AgentChatMessage = {
   /** classify-task keyword heuristic (+ cheap LLM tie-break on agent). */
   keyword_category?: string | null;
   keyword_confidence?: number | null;
+  attachments?: AgentChatAttachment[] | null;
 };
 
 export type AgentChatToolExecutionMode = "ask_permission" | "auto_accept";
@@ -157,6 +164,26 @@ export async function listAgentChatMessages(sessionId: string): Promise<AgentCha
   const text = await res.text();
   if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
   return JSON.parse(text) as AgentChatMessage[];
+}
+
+export async function downloadAgentChatAttachment(
+  sessionId: string,
+  attachmentId: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(
+    `${getApiBase()}${PREFIX}/sessions/${sessionId}/attachments/${attachmentId}`,
+    { headers: bearerHeaders() },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  }
+  const cd = res.headers.get("Content-Disposition") || "";
+  let filename = "download.pdf";
+  const m = /filename="([^"]+)"/.exec(cd);
+  if (m?.[1]) filename = m[1];
+  const blob = await res.blob();
+  return { blob, filename };
 }
 
 export async function fetchAgentChatOrgTools(): Promise<AgentChatOrgToolRow[]> {

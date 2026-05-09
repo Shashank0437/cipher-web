@@ -12,6 +12,7 @@ import type { AuthUser } from "@/lib/auth-context";
 import {
   createAgentChatSession,
   deleteAgentChatSession,
+  downloadAgentChatAttachment,
   fetchAgentChatOrgTools,
   listAgentChatMessages,
   listAgentChatSessions,
@@ -589,6 +590,23 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       if (!silent) {
         setMessagesLoading(false);
       }
+    }
+  }, []);
+
+  const downloadChatPdf = useCallback(async (sessionId: string, attachmentId: string, fallbackName: string) => {
+    try {
+      setActionErr(null);
+      const { blob, filename } = await downloadAgentChatAttachment(sessionId, attachmentId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setActionErr(formatChatError(e));
     }
   }, []);
 
@@ -1417,6 +1435,24 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           <p className="whitespace-pre-wrap break-words break-all">{m.content}</p>
                         )}
                       </div>
+                      {m.role === "assistant" &&
+                      m.attachments &&
+                      m.attachments.length > 0 &&
+                      selectedSessionId ? (
+                        <div className="flex flex-wrap gap-2">
+                          {m.attachments.map((a) => (
+                            <button
+                              key={a.id}
+                              type="button"
+                              onClick={() => void downloadChatPdf(selectedSessionId, a.id, a.filename)}
+                              className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant bg-surface-container-high px-3 py-1.5 text-[13px] font-semibold text-primary transition hover:border-primary/40 hover:bg-primary/8"
+                            >
+                              <MaterialSymbol name="picture_as_pdf" className="text-lg" />
+                              {a.filename || "Download PDF"}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
                       {m.role === "assistant" && batchPanelOpen(m)
                         ? (() => {
                             const batchSt = m.batch_execution_state ?? "";

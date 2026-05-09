@@ -39,6 +39,12 @@ class AgentChatOrgToolsOut(BaseModel):
     tools: list[AgentChatOrgToolRow]
 
 
+class AgentChatAttachmentOut(BaseModel):
+    id: str
+    filename: str
+    content_type: str = "application/pdf"
+
+
 class AgentChatMessageOut(BaseModel):
     id: str
     role: str
@@ -51,6 +57,7 @@ class AgentChatMessageOut(BaseModel):
     router_category: str | None = None
     keyword_category: str | None = None
     keyword_confidence: float | None = None
+    attachments: list[AgentChatAttachmentOut] | None = None
 
 
 class AgentChatToolDecisionsPatch(BaseModel):

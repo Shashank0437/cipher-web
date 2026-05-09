@@ -10,7 +10,7 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import get_settings
@@ -18,6 +18,7 @@ from app.constants import AGENT_CHAT_MESSAGES_COLLECTION, AGENT_CHAT_SESSIONS_CO
 from app.db import get_database
 from app.dependencies.auth import require_auth_user
 from app.schemas.agent_chat import (
+    AgentChatAttachmentOut,
     AgentChatMessageOut,
     AgentChatOrgToolRow,
     AgentChatOrgToolsOut,
@@ -31,10 +32,12 @@ from app.schemas.agent_chat import (
 from app.services.agent_chat import (
     TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
+    attachments_from_tool_result_json,
     build_llm_messages_from_history,
     context_snippet,
     create_session,
     delete_session,
+    get_agent_chat_attachment_owned,
     get_message_owned,
     get_session_owned,
     insert_message,
@@ -50,6 +53,7 @@ from app.services.agent_chat import (
     stream_cipherstrike_turn,
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
+    touch_session_ui_context,
     _run_one_tool_detailed,
     _slot_progress_payload,
     _sse_flush_tick,
@@ -95,6 +99,21 @@ def _message_out(doc: dict) -> AgentChatMessageOut:
             return float(v)
         return None
 
+    att_raw = doc.get("attachments")
+    att_out: list[AgentChatAttachmentOut] | None = None
+    if isinstance(att_raw, list) and att_raw:
+        cleaned: list[AgentChatAttachmentOut] = []
+        for a in att_raw:
+            if isinstance(a, dict) and a.get("id") and a.get("filename"):
+                cleaned.append(
+                    AgentChatAttachmentOut(
+                        id=str(a["id"]),
+                        filename=str(a["filename"]),
+                        content_type=str(a.get("content_type") or "application/pdf"),
+                    )
+                )
+        att_out = cleaned or None
+
     return AgentChatMessageOut(
         id=str(doc["_id"]),
         role=str(doc.get("role") or "user"),
@@ -107,6 +126,7 @@ def _message_out(doc: dict) -> AgentChatMessageOut:
         router_category=str(doc["router_category"]).strip() if doc.get("router_category") else None,
         keyword_category=str(doc["keyword_category"]).strip() if doc.get("keyword_category") else None,
         keyword_confidence=_f("keyword_confidence"),
+        attachments=att_out,
     )
 
 
@@ -221,6 +241,42 @@ async def get_messages(
     return [_message_out(m) for m in rows]
 
 
+@router.get("/sessions/{session_id}/attachments/{attachment_id}")
+async def download_agent_chat_attachment(
+    session_id: str,
+    attachment_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    sid = _oid(session_id)
+    aid = _oid(attachment_id)
+    sess = await get_session_owned(
+        db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid
+    )
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    doc = await get_agent_chat_attachment_owned(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        attachment_id=aid,
+    )
+    if not doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    data = doc.get("data")
+    if data is None:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Invalid attachment payload")
+    payload = bytes(data) if not isinstance(data, bytes) else data
+    fn = str(doc.get("filename") or "download.pdf")
+    ct = str(doc.get("content_type") or "application/pdf")
+    return Response(
+        content=payload,
+        media_type=ct,
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )
+
+
 @router.post("/sessions/{session_id}/messages")
 async def post_message_stream(
     session_id: str,
@@ -242,6 +298,9 @@ async def post_message_stream(
         role="user",
         content=body.message.strip(),
     )
+
+    ctx_dump = body.context.model_dump() if body.context else {}
+    await touch_session_ui_context(db, sid, ctx_dump)
 
     if str(sess.get("title") or "").strip() in ("", "New chat"):
         auto = body.message.strip()[:50] + ("…" if len(body.message.strip()) > 50 else "")
@@ -565,6 +624,8 @@ async def tool_confirm_stream(
                         "tool_name": tool_name,
                         "started_at": started_iso,
                     },
+                    chat_tool_context=(db, user["organization_id"], user["_id"], sid),
+                    enrichment_tool_name=tool_name,
                 )
 
             exec_task = asyncio.create_task(run_tool())
@@ -609,6 +670,7 @@ async def tool_confirm_stream(
                 f"Arguments: `{json.dumps(args)}`\n"
                 f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
             )
+            att = attachments_from_tool_result_json(result_text)
             await insert_message(
                 db,
                 organization_id=user["organization_id"],
@@ -616,6 +678,7 @@ async def tool_confirm_stream(
                 session_id=sid,
                 role="assistant",
                 content=exec_record,
+                attachments=att,
             )
             await insert_message(
                 db,
