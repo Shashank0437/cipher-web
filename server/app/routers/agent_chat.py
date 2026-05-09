@@ -588,9 +588,6 @@ async def tool_confirm_stream(
                 }
                 result_text = json.dumps({"error": str(exc)})
 
-            if len(result_text) > 4000:
-                result_text = result_text[:4000] + "\n… (truncated)"
-
             exec_record = (
                 f"[Tool executed: **{tool_name}**]\n"
                 f"Arguments: `{json.dumps(args)}`\n"

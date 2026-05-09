@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     # Rolling summary: when non-zero, summarize older turns once thread exceeds this message count (Mongo session doc).
     agent_chat_summarize_after_messages: int = Field(default=0, ge=0, le=500)
 
+    # Max characters of JSON tool result passed to the LLM (after noise strip + head/tail on stdout/stderr).
+    agent_chat_tool_result_max_chars: int = Field(
+        default=56_000,
+        ge=4_000,
+        le=500_000,
+        validation_alias=AliasChoices("AGENT_CHAT_TOOL_RESULT_MAX_CHARS"),
+    )
+
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (
         "You are CipherStrike, an expert penetration testing AI assistant. "

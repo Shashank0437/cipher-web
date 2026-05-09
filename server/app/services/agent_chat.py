@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +33,108 @@ logger = logging.getLogger(__name__)
 
 _MAX_AGENT_CHAT_THINKING_CHARS = 100_000
 _TOOL_LOG_TAIL_MAX_BYTES = 32 * 1024
+
+# Nmap (and similar) spam stdout with periodic Stats / timing lines — drop before LLM sizing.
+_SCANNER_PROGRESS_LINE = re.compile(
+    r"^(Stats:|NSE Timing:|Connect Scan Timing:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_MIDDLE_OMITTED = "\n… [middle omitted] …\n"
+
+
+def _strip_scanner_progress_noise(text: str) -> str:
+    if not text or not text.strip():
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not _SCANNER_PROGRESS_LINE.match(ln)]
+    return "\n".join(kept) if kept else text
+
+
+def _head_tail_truncate(s: str, *, max_chars: int, head_fraction: float = 0.22) -> tuple[str, bool]:
+    """Keep start + end of ``s`` so conclusions (e.g. nmap tail) survive LLM context limits."""
+    if max_chars < 400 or len(s) <= max_chars:
+        return s, False
+    mid_w = len(_MIDDLE_OMITTED)
+    head_n = min(max(500, int(max_chars * head_fraction)), max_chars // 2)
+    tail_n = max_chars - head_n - mid_w - 48
+    if tail_n < 600:
+        tail_n = max(600, max_chars // 2)
+        head_n = max(400, max_chars - tail_n - mid_w - 48)
+    head = s[:head_n]
+    tail = s[-tail_n:] if tail_n > 0 else ""
+    omitted = max(0, len(s) - head_n - tail_n)
+    return f"{head}{_MIDDLE_OMITTED}({omitted} characters omitted)\n{tail}", True
+
+
+def _truncate_raw_for_llm(raw: str, max_chars: int) -> str:
+    if len(raw) <= max_chars:
+        return raw
+    out, _ = _head_tail_truncate(raw, max_chars=max_chars, head_fraction=0.12)
+    if len(out) <= max_chars:
+        return out
+    return raw[-max_chars:] + "\n… (truncated at start)"
+
+
+def _llm_summary_from_result(d: dict[str, Any], http_status: int) -> dict[str, Any]:
+    rc = d.get("return_code")
+    if rc is None:
+        rc = d.get("exit_code")
+    return {
+        "http_status": http_status,
+        "return_code": rc,
+        "partial_results": d.get("partial_results"),
+        "success": d.get("success"),
+        "execution_time": d.get("execution_time"),
+    }
+
+
+def _prepare_agent_tool_result_for_llm(settings: Settings, result_obj: Any, http_status: int) -> str:
+    """Serialize agent tool JSON for LLM messages: strip scanner noise, head+tail long streams, add _llm_summary."""
+    max_c = int(getattr(settings, "agent_chat_tool_result_max_chars", 56_000) or 56_000)
+    if not isinstance(result_obj, dict):
+        raw = "" if result_obj is None else str(result_obj)
+        return _truncate_raw_for_llm(raw, max_c)
+
+    work: dict[str, Any] = dict(result_obj)
+    for key in ("stdout", "stderr"):
+        v = work.get(key)
+        if isinstance(v, str) and v:
+            work[key] = _strip_scanner_progress_noise(v)
+
+    field_budget = max(12_000, int(max_c * 0.82))
+    so = work.get("stdout")
+    se = work.get("stderr")
+    if isinstance(so, str) and so and isinstance(se, str) and se:
+        half = max(4000, field_budget // 2)
+        work["stdout"], _ = _head_tail_truncate(so, max_chars=half, head_fraction=0.2)
+        work["stderr"], _ = _head_tail_truncate(se, max_chars=half, head_fraction=0.2)
+    elif isinstance(so, str) and so:
+        work["stdout"], _ = _head_tail_truncate(so, max_chars=field_budget, head_fraction=0.2)
+    elif isinstance(se, str) and se:
+        work["stderr"], _ = _head_tail_truncate(se, max_chars=field_budget, head_fraction=0.2)
+
+    summary = _llm_summary_from_result(work, http_status)
+    ordered: dict[str, Any] = {"_llm_summary": summary}
+    for k, v in work.items():
+        if k != "_llm_summary":
+            ordered[k] = v
+
+    text = json.dumps(ordered, indent=2)
+    if len(text) <= max_c:
+        return text
+    if isinstance(ordered.get("stdout"), str):
+        ordered["stdout"], _ = _head_tail_truncate(
+            str(ordered["stdout"]), max_chars=min(16_000, max_c // 3), head_fraction=0.08
+        )
+    if isinstance(ordered.get("stderr"), str):
+        ordered["stderr"], _ = _head_tail_truncate(
+            str(ordered["stderr"]), max_chars=min(8000, max_c // 5), head_fraction=0.1
+        )
+    text = json.dumps(ordered, indent=2)
+    if len(text) <= max_c:
+        return text
+    tail_keep = max(max_c - 72, 2000)
+    return f"… ({len(text) - tail_keep} chars omitted from JSON start)\n" + text[-tail_keep:]
 
 
 def _utc_now_iso() -> str:
@@ -1218,11 +1321,9 @@ async def _run_one_tool_detailed(
         try:
             result_obj: Any = json.loads(content.decode("utf-8"))
         except Exception:
-            raw = content.decode("utf-8", errors="replace")[:4000]
+            raw = content.decode("utf-8", errors="replace")
             result_obj = {"http_status": status_code, "raw": raw}
-        result_text = json.dumps(result_obj, indent=2)
-        if len(result_text) > 4000:
-            result_text = result_text[:4000] + "\n… (truncated)"
+        result_text = _prepare_agent_tool_result_for_llm(settings, result_obj, status_code)
         meta = _progress_from_completed_run(status_code, result_obj)
         return result_text, meta, status_code
 
@@ -1310,11 +1411,9 @@ async def _run_one_tool_detailed(
     try:
         result_obj = json.loads(content.decode("utf-8"))
     except Exception:
-        raw = content.decode("utf-8", errors="replace")[:4000]
+        raw = content.decode("utf-8", errors="replace")
         result_obj = {"http_status": status_code, "raw": raw}
-    result_text = json.dumps(result_obj, indent=2)
-    if len(result_text) > 4000:
-        result_text = result_text[:4000] + "\n… (truncated)"
+    result_text = _prepare_agent_tool_result_for_llm(settings, result_obj, status_code)
     meta = _progress_from_completed_run(status_code, result_obj)
     return result_text, meta, status_code
 

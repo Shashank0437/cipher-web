@@ -1555,10 +1555,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     </div>
                   ))}
                   {(reasoningStreaming || streamReasoning.length > 0) && (
-                    <details
-                      className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]"
-                      open={reasoningStreaming}
-                    >
+                    <details className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]">
                       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
                         <span>
                           {reasoningStreaming
