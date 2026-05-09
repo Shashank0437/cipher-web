@@ -32,6 +32,7 @@ from app.schemas.agent_chat import (
 from app.services.agent_chat import (
     TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
+    _agent_chat_skip_tool_approval_prompt,
     attachments_from_tool_result_json,
     build_llm_messages_from_history,
     context_snippet,
@@ -526,7 +527,7 @@ async def tool_confirm_stream(
 
     if body.approved:
         roles = user.get("roles") or []
-        if "tenant_admin" not in roles:
+        if "tenant_admin" not in roles and not _agent_chat_skip_tool_approval_prompt(tool_name):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 detail="Tenant administrator role required to execute tools",

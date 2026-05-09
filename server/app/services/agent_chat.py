@@ -39,6 +39,25 @@ logger = logging.getLogger(__name__)
 
 PENETRATION_REPORT_TOOL_NAME = "penetration-report"
 
+# Tools that only derive artifacts from chat/session state (no host probes). Any session owner runs
+# these immediately when tool_execution_mode is ask_permission — avoids infosec-style approval UX.
+AGENT_CHAT_TOOLS_SKIP_APPROVAL_PROMPT: frozenset[str] = frozenset({PENETRATION_REPORT_TOOL_NAME})
+
+
+def _agent_chat_skip_tool_approval_prompt(tool_name: str) -> bool:
+    return tool_name.strip() in AGENT_CHAT_TOOLS_SKIP_APPROVAL_PROMPT
+
+
+def _agent_chat_all_slots_skip_approval_prompt(slots: list[dict[str, Any]]) -> bool:
+    if not slots:
+        return False
+    for s in slots:
+        tn = str(s.get("tool_name") or "").strip()
+        if not tn or tn not in AGENT_CHAT_TOOLS_SKIP_APPROVAL_PROMPT:
+            return False
+    return True
+
+
 _MAX_AGENT_CHAT_THINKING_CHARS = 100_000
 _MAX_LLM_TOOL_SCHEMAS_STORE_BYTES = 400_000
 _TOOL_LOG_TAIL_MAX_BYTES = 32 * 1024
@@ -326,6 +345,9 @@ _CHAT_TOOL_BLOCKLIST = frozenset(
         "ai_osint_session",
     },
 )
+
+# Omit from GET /workspace/agent-chat/org-tools UI; still in router catalog + execution paths.
+_CHAT_TOOLS_HIDE_FROM_ORG_PICKER = frozenset({PENETRATION_REPORT_TOOL_NAME})
 
 # Workflow slugs aligned with NyxStrike tool_registry.CATEGORIES (for validating router output).
 _CHAT_ROUTING_CATEGORY_SLUGS = frozenset(
@@ -1090,6 +1112,8 @@ async def list_agent_chat_org_tools_catalog(
     by_name, _router_catalog = ctx
     rows: list[dict[str, str]] = []
     for name in sorted(by_name.keys()):
+        if name in _CHAT_TOOLS_HIDE_FROM_ORG_PICKER:
+            continue
         item = by_name[name]
         rows.append({"name": name, "description": str(item.get("desc") or "").strip()})
     return rows
@@ -1355,6 +1379,8 @@ async def stream_cipherstrike_turn(
     Supports TOOL_CALL_PENDING (single) and TOOL_CALL_BATCH_PENDING (multi-slot quorum batch).
     When auto_accept_tools is True (tenant admins only for execution), runs tools immediately
     instead of persisting pending / quorum rows — org-disabled tools stay blocked.
+    Certain low-risk tools (see AGENT_CHAT_TOOLS_SKIP_APPROVAL_PROMPT) also auto-run when the client
+    mode is ask_permission (still subject to org disabled-tool policy).
 
     Progressive tokens require live chunks from the agent. Operational turns with tool schemas on
     non-Gemini backends use the bridge's blocking chat-then-chunk SSE path: expect little or no text
@@ -1411,7 +1437,8 @@ async def stream_cipherstrike_turn(
                             },
                         )
                         lines.append(f"- **{tn}** — `{json.dumps(args)}`")
-                    if auto_accept_tools and slots:
+                    batch_auto = auto_accept_tools or _agent_chat_all_slots_skip_approval_prompt(slots)
+                    if batch_auto and slots:
                         approve_slots = [{**s, "human_decision": "approve"} for s in slots]
                         carry_pre_tool_thinking = "".join(thinking_chunks).strip() or None
                         thinking_chunks.clear()
@@ -1463,7 +1490,8 @@ async def stream_cipherstrike_turn(
                     args = pending_data.get("arguments") if isinstance(pending_data.get("arguments"), dict) else {}
                     endpoint = str(pending_data.get("endpoint") or "")
                     desc = str(pending_data.get("description") or "")
-                    if auto_accept_tools and tool_name.strip():
+                    single_auto = auto_accept_tools or _agent_chat_skip_tool_approval_prompt(tool_name)
+                    if single_auto and tool_name.strip():
                         carry_pre_tool_thinking = "".join(thinking_chunks).strip() or None
                         thinking_chunks.clear()
                         async for line in _auto_execute_single_tool_sse(
@@ -1828,10 +1856,18 @@ async def execute_tool_slots_follow_up(
 ) -> AsyncIterator[str]:
     """Persist executions for each slot (approve/reject/blocked), optionally patch batch parent row, stream LLM follow-up."""
     needs_exec = any(str(s.get("human_decision") or "").lower() == "approve" for s in slots)
-    if needs_exec and "tenant_admin" not in (tenant_roles or []):
-        yield "data: [ERROR] Tenant administrator role required to execute tools\n\n"
-        yield "data: [DONE]\n\n"
-        return
+    if needs_exec:
+        approved_only = [
+            s for s in slots if str(s.get("human_decision") or "").lower() == "approve"
+        ]
+        all_approved_safe = bool(approved_only) and all(
+            _agent_chat_skip_tool_approval_prompt(str(s.get("tool_name") or "").strip())
+            for s in approved_only
+        )
+        if "tenant_admin" not in (tenant_roles or []) and not all_approved_safe:
+            yield "data: [ERROR] Tenant administrator role required to execute tools\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
     from app.services.organization_tools import get_disabled_tool_names
 
@@ -2190,7 +2226,8 @@ async def _auto_execute_single_tool_sse(
     carry_thinking: str | None = None,
     follow_tool_schemas: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
-    if "tenant_admin" not in (tenant_roles or []):
+    roles_l = list(tenant_roles or [])
+    if "tenant_admin" not in roles_l and not _agent_chat_skip_tool_approval_prompt(tool_name):
         yield "data: [ERROR] Tenant administrator role required for automatic tool execution\n\n"
         yield "data: [DONE]\n\n"
         return

@@ -45,6 +45,9 @@ api_tools_router = APIRouter(prefix="/api", tags=["workspace"])
 
 SERVER_LAYER_CATEGORIES = frozenset({"intelligence", "ai_assist", "vulnerability_intelligence"})
 
+# Session-derived actions invoked only from agent chat (not run from the workspace grid).
+_WORKSPACE_TOOLS_EXCLUDE_FROM_GRID = frozenset({"penetration-report"})
+
 
 def _coerce_param_payload(obj: object) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
@@ -84,7 +87,7 @@ def _build_cards(health: dict[str, Any], catalog: dict[str, Any]) -> list[Worksp
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
-        if not name:
+        if not name or name in _WORKSPACE_TOOLS_EXCLUDE_FROM_GRID:
             continue
         category = str(item.get("category") or "uncategorized")
         endpoint = str(item.get("endpoint") or "")
