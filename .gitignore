@@ -1,0 +1,7 @@
+# Local env and secrets (never commit real values)
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store

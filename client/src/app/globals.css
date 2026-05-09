@@ -1,0 +1,190 @@
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=swap");
+@import "tailwindcss";
+
+:root {
+  /* Agentic workspace Stitch export — main canvas + sidebar */
+  --background: #fdfcff;
+  --foreground: #1b1b21;
+  --muted: #45464f;
+  --accent: #684cb6;
+  --accent-soft: #e9ddff;
+  --border: #c6c5d0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Google Stitch export — CipherStrike marketing + workspace (project 3983447513859599936) */
+  --color-on-background: #1b1b21;
+  --color-primary: #684cb6;
+  --color-on-primary: #ffffff;
+  --color-primary-dim: #5b3fa9;
+  --color-primary-container: #e9ddff;
+  --color-on-primary-container: #22005d;
+  --color-surface: #fdfcff;
+  --color-surface-container: #f1f0f7;
+  --color-surface-container-low: #f6f5ff;
+  --color-surface-container-high: #ebe9f4;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-highest: #e5e4ef;
+  --color-surface-variant: #e2e1ec;
+  --color-on-surface: #1b1b21;
+  --color-on-surface-variant: #45464f;
+  --color-outline: #767680;
+  --color-outline-variant: #c6c5d0;
+  --color-tertiary: #006d4b;
+  --color-tertiary-container: #6bffc1;
+  --color-on-tertiary-container: #006042;
+  --color-error: #a8364b;
+  --color-error-container: #f97386;
+  --color-secondary: #5e5e67;
+}
+
+@keyframes stitch-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes agentic-stream-chunk {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.agentic-stream-chunk {
+  animation: agentic-stream-chunk 0.48s ease-out both;
+}
+
+.stitch-marquee-container {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.stitch-marquee-content {
+  display: inline-flex;
+  animation: stitch-marquee 30s linear infinite;
+}
+
+@keyframes landing-hero-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
+}
+
+.landing-hero-orb {
+  animation: landing-hero-breathe 18s ease-in-out infinite;
+}
+
+.landing-hero-orb-delay {
+  animation-delay: -9s;
+}
+
+.landing-hero-mesh {
+  background-image:
+    radial-gradient(circle at 10% 20%, rgba(196, 181, 253, 0.25) 0%, transparent 40%),
+    radial-gradient(circle at 85% 0%, rgba(34, 211, 238, 0.12) 0%, transparent 35%),
+    linear-gradient(
+      120deg,
+      rgba(139, 92, 246, 0.08) 0%,
+      rgba(15, 10, 31, 0.4) 40%,
+      rgba(52, 211, 153, 0.05) 100%
+    );
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+.terminal-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-outline-variant) transparent;
+}
+.terminal-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.terminal-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.terminal-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-outline-variant);
+  border-radius: 10px;
+}
+
+.material-symbols-outlined {
+  font-family: "Material Symbols Outlined", sans-serif;
+  font-weight: normal;
+  font-style: normal;
+  font-size: 1.25rem;
+  line-height: 1;
+  display: inline-block;
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Long-form legal / policy pages */
+.prose-marketing {
+  font-size: 1.0625rem;
+  line-height: 1.75;
+  color: var(--color-on-surface-variant);
+}
+.prose-marketing > p {
+  margin-bottom: 1.25rem;
+}
+.prose-marketing > p:last-child {
+  margin-bottom: 0;
+}
+.prose-marketing h2 {
+  margin-top: 2.75rem;
+  margin-bottom: 0.85rem;
+  padding-top: 2.25rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-outline-variant) 70%, transparent);
+  font-size: 1.22rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--color-on-surface);
+  scroll-margin-top: 6rem;
+}
+.prose-marketing h2:first-of-type {
+  margin-top: 0.75rem;
+  padding-top: 0;
+  border-top: none;
+}
+.prose-marketing ul {
+  margin: 1rem 0 1.25rem;
+  padding-left: 1.35rem;
+  list-style: disc;
+}
+.prose-marketing ul li {
+  margin-bottom: 0.55rem;
+  padding-left: 0.2rem;
+}
+.prose-marketing ul li::marker {
+  color: var(--color-primary);
+}
+.prose-marketing .lead-intro {
+  font-size: 1.125rem;
+  line-height: 1.65;
+  color: var(--color-on-surface);
+  margin-bottom: 2rem;
+}

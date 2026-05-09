@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CipherStrike</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f7f5fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1b1528;">
+    <span style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0">{{ preheader }}</span>
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background-color:#f7f5fb;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:560px;background:#ffffff;border-radius:16px;border:1px solid #e4dff0;box-shadow:0 1px 3px rgba(91,33,182,0.08);">
+            <tr>
+              <td style="height:5px;background:linear-gradient(90deg,#7c3aed,#6366f1,#22d3ee);"></td>
+            </tr>
+            <tr>
+              <td style="padding:32px 32px 8px;">
+                <div style="font-size:13px;letter-spacing:0.35em;text-transform:uppercase;color:#6d28d9;font-weight:700;">CipherStrike</div>
+                <h1 style="margin:16px 0 8px;font-size:24px;line-height:1.25;font-weight:800;color:#17131f;">You're approved</h1>
+                <p style="margin:0 0 16px;font-size:16px;line-height:1.55;color:#3f3a4f;">
+                  Hi {{ recipient_name }}, your organization <strong style="color:#111827;">{{ company_name }}</strong> is cleared to finish onboarding.
+                </p>
+                <p style="margin:0 0 24px;font-size:15px;line-height:1.55;color:#5b4d7a;">
+                  Create your password to activate your tenant workspace. This link expires after several days for security.
+                </p>
+                <a href="{{ complete_url }}" style="display:inline-block;padding:14px 28px;border-radius:999px;background:linear-gradient(90deg,#7c3aed,#6366f1,#0ea5e9);color:#ffffff;font-weight:800;font-size:15px;text-decoration:none;border:1px solid rgba(124,58,237,0.35);box-shadow:0 2px 8px rgba(124,58,237,0.22);">
+                  Set password &amp; enter workspace
+                </a>
+                <p style="margin:28px 0 0;font-size:12px;line-height:1.6;color:#6b7280;">
+                  If the button doesn't work, paste this URL into your browser:<br />
+                  <span style="word-break:break-all;color:#5b21b6;">{{ complete_url }}</span>
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 32px 28px;border-top:1px solid #ede9fe;">
+                <p style="margin:20px 0 0;font-size:11px;line-height:1.5;color:#64748b;">
+                  You received this because a CipherStrike administrator approved your registration. If this wasn't you, ignore this message.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

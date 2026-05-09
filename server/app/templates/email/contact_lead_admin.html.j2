@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+  <body style="margin:0;padding:0;background-color:#f7f5fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1b1528;">
+    <span style="display:none!important;visibility:hidden;opacity:0;height:0;width:0">{{ preheader }}</span>
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="padding:24px;">
+      <tr><td align="center">
+        <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;border:1px solid #e4dff0;box-shadow:0 1px 3px rgba(91,33,182,0.08);">
+          <tr><td style="height:4px;background:linear-gradient(90deg,#7c3aed,#6366f1,#22d3ee);"></td></tr>
+          <tr><td style="padding:28px 28px 8px;">
+            <div style="font-size:11px;letter-spacing:0.3em;text-transform:uppercase;color:#6d28d9;font-weight:700;">CipherStrike</div>
+            <h1 style="margin:12px 0 16px;font-size:18px;font-weight:700;color:#17131f;">New contact form submission</h1>
+            <table role="presentation" width="100%" style="font-size:14px;line-height:1.6;">
+              <tr><td style="padding:6px 0;color:#45464f;"><strong>Name</strong></td><td style="padding:6px 0;color:#1b1528;">{{ first_name }} {{ last_name }}</td></tr>
+              <tr><td style="padding:6px 0;color:#45464f;"><strong>Email</strong></td><td style="padding:6px 0;"><a href="mailto:{{ email }}" style="color:#5b21b6;">{{ email }}</a></td></tr>
+              <tr><td style="padding:6px 0;color:#45464f;"><strong>Company</strong></td><td style="padding:6px 0;color:#1b1528;">{{ company }}</td></tr>
+              {% if phone %}<tr><td style="padding:6px 0;color:#45464f;"><strong>Phone</strong></td><td style="padding:6px 0;color:#1b1528;">{{ phone }}</td></tr>{% endif %}
+            </table>
+            <p style="margin:20px 0 8px;padding:10px 12px;background:#faf5ff;border-radius:8px;border:1px solid #ede9fe;font-size:12px;line-height:1.5;color:#5c5d66;"><strong>To (team)</strong><br/><span>{{ team_to_line }}</span></p>
+            <p style="margin:16px 0 8px;font-size:13px;font-weight:600;color:#45464f;">Message</p>
+            <div style="white-space:pre-wrap;padding:14px;background:#faf5ff;border-radius:8px;border:1px solid #ede9fe;font-size:14px;line-height:1.55;color:#3f3a4f;">{{ message }}</div>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>

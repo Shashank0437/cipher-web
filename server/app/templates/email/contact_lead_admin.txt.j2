@@ -1,0 +1,14 @@
+{{ preheader }}
+
+New CipherStrike contact form submission
+
+To (team): {{ team_to_line }}
+
+Name: {{ first_name }} {{ last_name }}
+Email: {{ email }}
+Company: {{ company }}
+{% if phone %}Phone: {{ phone }}
+{% endif %}
+
+Message:
+{{ message }}
