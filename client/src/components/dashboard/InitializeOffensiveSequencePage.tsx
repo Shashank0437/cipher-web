@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowDown, ArrowUp, Loader2, Terminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { AgentChatMarkdown } from "@/components/dashboard/AgentChatMarkdown";
+import { AgentChatMarkdown, extractToolResultJsonFromExecContent } from "@/components/dashboard/AgentChatMarkdown";
 import { DashboardHeaderProfile } from "@/components/dashboard/DashboardHeaderProfile";
 import { AgentChatExecModeDropdown } from "@/components/dashboard/AgentChatExecModeDropdown";
 import { MaterialSymbol } from "@/components/ui/MaterialSymbol";
@@ -80,16 +80,53 @@ function isRedundantToolResultEcho(previousMessage: AgentChatMessage | undefined
   if (!previousMessage || previousMessage.role !== "assistant") return false;
   const prev = previousMessage.content ?? "";
   if (!prev.includes("[Tool executed:")) return false;
-  const re = /\[Tool executed:[\s\S]*?Result:\s*\n```json\s*\n([\s\S]*?)\n```/;
-  const match = prev.match(re);
-  if (!match) return false;
-  const embedded = match[1].trim();
+  const embedded = extractToolResultJsonFromExecContent(prev);
+  if (embedded == null) return false;
   const tool = toolContent.trim();
   if (embedded === tool) return true;
   try {
     return JSON.stringify(JSON.parse(embedded)) === JSON.stringify(JSON.parse(tool));
   } catch {
     return false;
+  }
+}
+
+/** LLM follow-up sometimes pastes the same raw tool JSON as its own assistant message — hide that duplicate bubble. */
+function getLatestToolJsonPayloadBefore(messages: AgentChatMessage[], beforeIdx: number): string | null {
+  for (let j = beforeIdx - 1; j >= 0; j--) {
+    const msg = messages[j];
+    if (msg.role === "tool") {
+      const t = (msg.content ?? "").trim();
+      if (t) return t;
+    }
+    if (msg.role === "user") return null;
+    if (msg.role === "assistant") {
+      const extracted = extractToolResultJsonFromExecContent(msg.content ?? "");
+      if (extracted) return extracted;
+      continue;
+    }
+  }
+  return null;
+}
+
+function isEchoAssistantToolJsonDuplicate(messages: AgentChatMessage[], idx: number): boolean {
+  const m = messages[idx];
+  if (m.role !== "assistant") return false;
+  const c = m.content ?? "";
+  if (c.includes("[Tool executed:")) return false;
+  const body = c.trim();
+  if (!body) return false;
+  let compare = body;
+  const fenced = body.match(/^(`{3,})json\s*\n([\s\S]*)\n\1\s*$/);
+  if (fenced) compare = fenced[2].trim();
+  const first = compare[0];
+  if (first !== "{" && first !== "[") return false;
+  const prior = getLatestToolJsonPayloadBefore(messages, idx);
+  if (!prior) return false;
+  try {
+    return JSON.stringify(JSON.parse(compare)) === JSON.stringify(JSON.parse(prior));
+  } catch {
+    return compare === prior.trim();
   }
 }
 
@@ -168,18 +205,30 @@ function BatchRunStatusChip({ batchState, slot }: { batchState: string; slot: Ag
   if (!rs) {
     return <span className="text-[10px] text-on-surface-variant">—</span>;
   }
+  if (rs === "running") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 text-[10px] font-bold text-on-primary shadow-sm">
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden strokeWidth={2.5} />
+        <span>Running…</span>
+      </span>
+    );
+  }
+  if (rs === "queued") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-primary/35 bg-primary-container px-2 py-0.5 text-[10px] font-semibold text-primary">
+        <Loader2 className="size-3 shrink-0 animate-pulse opacity-80" aria-hidden strokeWidth={2.5} />
+        <span>Queued…</span>
+      </span>
+    );
+  }
   const cls =
-    rs === "running"
-      ? "bg-primary/20 text-primary animate-pulse"
-      : rs === "queued"
-        ? "bg-surface-container-high text-on-surface-variant"
-        : rs === "done"
-          ? "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200"
-          : rs === "error"
-            ? "bg-error/15 text-error"
-            : rs === "skipped"
-              ? "bg-outline-variant/40 text-on-surface-variant"
-              : "bg-surface-container-high text-on-surface";
+    rs === "done"
+      ? "border border-emerald-800/35 bg-emerald-700 text-white shadow-sm dark:border-emerald-400/50 dark:bg-emerald-500 dark:text-emerald-950"
+      : rs === "error"
+        ? "bg-error/15 text-error"
+        : rs === "skipped"
+          ? "bg-outline-variant/40 text-on-surface-variant"
+          : "bg-surface-container-high text-on-surface";
   return <span className={`rounded-md px-1.5 py-0 text-[10px] font-semibold capitalize ${cls}`}>{rs}</span>;
 }
 
@@ -1058,6 +1107,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     visibleMessages.some((m) => m.role === "assistant" && m.content.trim() === streamPreviewText);
   const visibleStreamPreview = persistedAssistantHasStreamPreview ? "" : streamPreview;
 
+  const batchToolsRunning = visibleMessages.some(
+    (m) =>
+      m.role === "assistant" &&
+      String(m.batch_execution_state ?? "").toLowerCase() === "executing",
+  );
+  const agentActivelyWorking =
+    isSending ||
+    confirmingId !== null ||
+    reasoningStreaming ||
+    batchToolsRunning ||
+    visibleStreamPreview.trim().length > 0;
+
   const hasThread =
     selectedSessionId !== null ||
     visibleMessages.length > 0 ||
@@ -1258,6 +1319,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                   ) : null}
                   {visibleMessages.map((m, idx) => {
                     if (m.role === "tool" && isRedundantToolResultEcho(visibleMessages[idx - 1], m.content)) {
+                      return null;
+                    }
+                    if (m.role === "assistant" && isEchoAssistantToolJsonDuplicate(visibleMessages, idx)) {
                       return null;
                     }
                     return (
@@ -1515,8 +1579,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                             const showRunChip =
                               confirmingId === m.id ||
                               Boolean(String(mergedSingle.run_status ?? "").trim());
+                            const runRs = String(mergedSingle.run_status ?? "").toLowerCase();
+                            const isRunActive =
+                              confirmingId === m.id || runRs === "running" || runRs === "queued";
                             return (
-                              <div className="w-full max-w-md rounded-xl border border-primary/25 bg-primary-container/30 px-4 py-3">
+                              <div className="w-full max-w-md overflow-hidden rounded-xl border border-primary/25 bg-primary-container/30">
+                                {isRunActive ? (
+                                  <div
+                                    className="h-1 w-full shrink-0 animate-pulse bg-primary"
+                                    aria-hidden
+                                  />
+                                ) : null}
+                                <div className="px-4 py-3">
                                 <p className="text-[12px] font-bold text-primary">
                                   {awaitingApproval ? "Tool approval required" : "Tool execution"}
                                 </p>
@@ -1564,12 +1638,27 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                                     />
                                   </div>
                                 ) : null}
+                                {isRunActive ? (
+                                  <p className="mt-2 flex items-start gap-2 rounded-lg bg-primary/10 px-2 py-1.5 text-[11px] leading-snug text-primary ring-1 ring-primary/15">
+                                    <Loader2
+                                      className="mt-0.5 size-3.5 shrink-0 animate-spin"
+                                      aria-hidden
+                                      strokeWidth={2.5}
+                                    />
+                                    <span>
+                                      Still running on the agent — this can take a while. Expand{" "}
+                                      <span className="font-semibold">Execution log</span> to watch output; the panel
+                                      updates on its own.
+                                    </span>
+                                  </p>
+                                ) : null}
                                 <BatchExecLogPanel slot={mergedSingle} />
                                 {awaitingApproval && !isTenantAdmin ? (
                                   <p className="mt-2 text-[11px] text-on-surface-variant">
                                     Approvals require the tenant administrator role. You can still reject.
                                   </p>
                                 ) : null}
+                                </div>
                               </div>
                             );
                           })()
@@ -1580,9 +1669,16 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                   {(reasoningStreaming || streamReasoning.length > 0) && (
                     <details className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]">
                       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
+                        {reasoningStreaming ? (
+                          <Loader2
+                            className="size-3.5 shrink-0 animate-spin text-primary"
+                            aria-hidden
+                            strokeWidth={2.5}
+                          />
+                        ) : null}
                         <span>
                           {reasoningStreaming
-                            ? "Thinking"
+                            ? "Thinking..."
                             : streamThoughtSeconds != null
                               ? `Thought for ${streamThoughtSeconds}s`
                               : "Thought"}
@@ -1601,6 +1697,19 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     <div className="mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)] py-1 text-[15px] leading-[1.75] text-on-surface">
                       <AgentChatMarkdown text={visibleStreamPreview} />
                       <span className="mt-0.5 inline-block h-3 w-1 animate-pulse rounded-full bg-primary align-middle" />
+                    </div>
+                  ) : null}
+                  {agentActivelyWorking ? (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      aria-atomic="true"
+                      className="sticky bottom-0 z-[15] mx-auto mt-3 flex w-full max-w-[min(100%,48rem)] items-center gap-2 rounded-xl border border-primary/30 bg-primary-container/95 px-3 py-2.5 text-[12px] font-semibold leading-snug text-primary shadow-md backdrop-blur-sm sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]"
+                    >
+                      <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden strokeWidth={2.5} />
+                      <span>
+                        Agent is working — you can keep this tab open; replies and tool output appear here when ready.
+                      </span>
                     </div>
                   ) : null}
                   <div ref={bottomRef} />

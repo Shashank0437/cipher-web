@@ -49,9 +49,16 @@ const components: Components = {
   hr: () => <hr className="my-3 border-outline-variant/60" />,
 };
 
-/** Matches persisted assistant tool rows from `agent_chat` (server template). */
-const TOOL_EXECUTED_BLOCK_RE =
-  /\[Tool executed: \*\*([^\*]+)\*\*\]\s*\nArguments: `([^`]*)`\s*\nResult:\s*\n```json\s*\n([\s\S]*?)\n```/g;
+/** Matches persisted assistant tool rows; fence is 3+ backticks, same length open/close (CommonMark). */
+const TOOL_EXEC_MARKDOWN_BLOCK_RE =
+  /\[Tool executed: \*\*([^\*]+)\*\*\]\s*\nArguments: `([^`]*)`\s*\nResult:\s*\n(`{3,})json\s*\n([\s\S]*?)\n\3/g;
+
+/** JSON payload inside the first ``[Tool executed: …] Result:`` fence, or null. */
+export function extractToolResultJsonFromExecContent(content: string): string | null {
+  const re = new RegExp(TOOL_EXEC_MARKDOWN_BLOCK_RE.source);
+  const m = re.exec(content);
+  return m && m[4] != null ? m[4].trim() : null;
+}
 
 type ParsedSegment =
   | { type: "markdown"; text: string }
@@ -60,7 +67,7 @@ type ParsedSegment =
 function parseToolExecutionRecords(text: string): ParsedSegment[] {
   const segments: ParsedSegment[] = [];
   let last = 0;
-  const re = new RegExp(TOOL_EXECUTED_BLOCK_RE.source, "g");
+  const re = new RegExp(TOOL_EXEC_MARKDOWN_BLOCK_RE.source, "g");
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) {

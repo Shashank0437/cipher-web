@@ -41,6 +41,10 @@ _SCANNER_PROGRESS_LINE = re.compile(
 )
 _MIDDLE_OMITTED = "\n… [middle omitted] …\n"
 
+# Markdown fence for tool JSON in persisted assistant rows. Four backticks so payloads
+# containing "```" (e.g. nmap/http stdout inside JSON strings) cannot close the fence early.
+TOOL_EXEC_JSON_MARKDOWN_FENCE = "````"
+
 
 def _strip_scanner_progress_noise(text: str) -> str:
     if not text or not text.strip():
@@ -1730,7 +1734,7 @@ async def execute_tool_slots_follow_up(
         exec_record = (
             f"[Tool executed: **{tn}**]\n"
             f"Arguments: `{json.dumps(args)}`\n"
-            f"Result:\n```json\n{result_text}\n```"
+            f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
         )
         await insert_message(
             db,
@@ -1838,7 +1842,7 @@ async def _auto_execute_single_tool_sse(
     exec_record = (
         f"[Tool executed: **{tool_name}**]\n"
         f"Arguments: `{json.dumps(args)}`\n"
-        f"Result:\n```json\n{result_text}\n```"
+        f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
     )
     await insert_message(
         db,

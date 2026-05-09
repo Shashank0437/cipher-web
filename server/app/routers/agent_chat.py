@@ -29,6 +29,7 @@ from app.schemas.agent_chat import (
     AgentChatToolDecisionsPatch,
 )
 from app.services.agent_chat import (
+    TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
     build_llm_messages_from_history,
     context_snippet,
@@ -591,7 +592,7 @@ async def tool_confirm_stream(
             exec_record = (
                 f"[Tool executed: **{tool_name}**]\n"
                 f"Arguments: `{json.dumps(args)}`\n"
-                f"Result:\n```json\n{result_text}\n```"
+                f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
             )
             await insert_message(
                 db,
