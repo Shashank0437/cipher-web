@@ -421,6 +421,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const reasoningStartedAtRef = useRef<number | null>(null);
   const streamPreviewQueueRef = useRef("");
   const streamPreviewFlushTimerRef = useRef<number | null>(null);
+  /** Debounce Mongo refresh when tool slots hit terminal status (before overall SSE `[DONE]`). */
+  const toolSlotTerminalRefreshTimerRef = useRef<number | null>(null);
   /** Skip auto-selecting the newest session once after `?new=1` so Run Scan opens an empty composer. */
   const skipAutosSelectRef = useRef(false);
 
@@ -600,6 +602,15 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
   useEffect(() => {
     setLiveBatchSlotOverlay({});
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (toolSlotTerminalRefreshTimerRef.current !== null) {
+        window.clearTimeout(toolSlotTerminalRefreshTimerRef.current);
+        toolSlotTerminalRefreshTimerRef.current = null;
+      }
+    };
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -795,10 +806,28 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         const payload = ev.payload as Record<string, unknown>;
         const { message_id: _m, ...rest } = payload;
         const key = `${mid}-${si}`;
+        const rs = String(rest.run_status ?? "").toLowerCase();
         setLiveBatchSlotOverlay((prev) => ({
           ...prev,
           [key]: { ...prev[key], ...(rest as Partial<AgentChatBatchSlot>) },
         }));
+        // Server persists confirmed slots / tool_call before LLM follow-up; refresh now so the approval
+        // card does not stick until the entire follow-up stream finishes or the connection drops.
+        if (rs === "done" || rs === "error" || rs === "skipped") {
+          if (toolSlotTerminalRefreshTimerRef.current !== null) {
+            window.clearTimeout(toolSlotTerminalRefreshTimerRef.current);
+          }
+          toolSlotTerminalRefreshTimerRef.current = window.setTimeout(() => {
+            toolSlotTerminalRefreshTimerRef.current = null;
+            void (async () => {
+              try {
+                await refreshMessages(sessionId, { silent: true });
+              } catch (e) {
+                setActionErr(formatChatError(e));
+              }
+            })();
+          }, 120);
+        }
         return;
       }
       if (ev.type === "error") {

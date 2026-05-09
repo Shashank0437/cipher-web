@@ -553,26 +553,6 @@ async def tool_confirm_stream(
             if len(result_text) > 4000:
                 result_text = result_text[:4000] + "\n… (truncated)"
 
-            yield _sse_tool_batch_slot_progress(
-                aid,
-                _slot_progress_payload(
-                    slot_index=0,
-                    tool_name=tool_name,
-                    run_status=str(prog.get("run_status") or "done"),
-                    stdout_tail=prog.get("stdout_tail"),
-                    stderr_tail=prog.get("stderr_tail"),
-                    stdout_truncated=bool(prog.get("stdout_truncated")),
-                    stderr_truncated=bool(prog.get("stderr_truncated")),
-                    exit_code=prog.get("exit_code"),
-                    http_status=prog.get("http_status"),
-                    started_at=started_iso,
-                    finished_at=prog.get("run_finished_at")
-                    if isinstance(prog.get("run_finished_at"), str)
-                    else None,
-                ),
-            )
-            await _sse_flush_tick()
-
             exec_record = (
                 f"[Tool executed: **{tool_name}**]\n"
                 f"Arguments: `{json.dumps(args)}`\n"
@@ -612,6 +592,24 @@ async def tool_confirm_stream(
                     },
                 },
             )
+
+            yield _sse_tool_batch_slot_progress(
+                aid,
+                _slot_progress_payload(
+                    slot_index=0,
+                    tool_name=tool_name,
+                    run_status=str(prog.get("run_status") or "done"),
+                    stdout_tail=prog.get("stdout_tail"),
+                    stderr_tail=prog.get("stderr_tail"),
+                    stdout_truncated=bool(prog.get("stdout_truncated")),
+                    stderr_truncated=bool(prog.get("stderr_truncated")),
+                    exit_code=prog.get("exit_code"),
+                    http_status=prog.get("http_status"),
+                    started_at=started_iso,
+                    finished_at=finished_iso,
+                ),
+            )
+            await _sse_flush_tick()
 
             follow_msgs = list(snapshot) + [{"role": "tool", "content": result_text}]
             async for chunk in stream_follow_up_after_tool(
