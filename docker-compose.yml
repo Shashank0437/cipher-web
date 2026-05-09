@@ -1,13 +1,18 @@
 services:
   mongo:
-    image: mongo:7
+    # MongoDB 5.0+ requires CPU AVX; use 4.4 on older hosts (e.g. HP Z800 / pre-AVX Xeon).
+    # On AVX-capable hardware you can switch to mongo:7 (new data dir / dump-restore if upgrading).
+    image: mongo:4.4
     ports:
       - "27017:27017"
     volumes:
       - cipherstrike_mongo:/data/db
     healthcheck:
       test:
-        ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+        [
+          "CMD-SHELL",
+          "mongo --quiet --eval 'quit(db.runCommand({ ping: 1 }).ok ? 0 : 2)'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
