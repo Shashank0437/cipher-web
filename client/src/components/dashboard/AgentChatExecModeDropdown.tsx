@@ -148,8 +148,6 @@ export function AgentChatExecModeDropdown({
 
   const selectionId = `${listboxId}-selection`;
   const align = menuAlign ?? (compact ? "end" : "start");
-  /** Opens below in compact/footer contexts so the panel does not cover the prompt textarea. */
-  const placement = compact ? "below" : "above";
 
   return (
     <div ref={rootRef} className="relative min-w-0">
@@ -203,9 +201,7 @@ export function AgentChatExecModeDropdown({
           aria-labelledby={`${listboxId}-trigger`}
           aria-activedescendant={`${listboxId}-opt-${highlight}`}
           onKeyDown={onListKeyDown}
-          className={`absolute z-[60] max-h-[min(280px,40vh)] overflow-auto rounded-xl border border-outline-variant bg-surface-container-lowest py-1.5 shadow-lg outline-none ring-1 ring-black/[0.04] ${
-            placement === "below" ? "top-[calc(100%+8px)]" : "bottom-[calc(100%+8px)]"
-          } ${
+          className={`absolute bottom-[calc(100%+8px)] z-[60] max-h-[min(280px,40vh)] overflow-auto rounded-xl border border-outline-variant bg-surface-container-lowest py-1.5 shadow-lg outline-none ring-1 ring-black/[0.04] ${
             align === "end"
               ? compact
                 ? "right-0 left-auto min-w-full max-w-[min(calc(100vw-2rem),320px)]"

@@ -315,7 +315,7 @@ function CipherStrikeClaudePromptBox({
           className="relative z-[1] min-h-[7.25rem] w-full resize-none bg-transparent px-5 pb-2 pt-5 text-[15px] leading-relaxed text-on-surface placeholder:font-medium placeholder:text-on-surface-variant/48 focus:outline-none focus:ring-0 sm:min-h-[7.75rem]"
         />
       </div>
-      <div className="flex items-center justify-between gap-2 overflow-visible rounded-b-[1.75rem] border-t border-outline-variant/55 bg-surface-container-low/95 px-2.5 py-2.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-3 sm:rounded-b-[2rem] sm:px-4 sm:py-3">
+      <div className="relative z-20 flex items-center justify-between gap-2 overflow-visible rounded-b-[1.75rem] border-t border-outline-variant/55 bg-surface-container-low/95 px-2.5 py-2.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-3 sm:rounded-b-[2rem] sm:px-4 sm:py-3">
         <div
           className="-mx-0.5 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-0.5 [scrollbar-width:none] sm:gap-2.5 [&::-webkit-scrollbar]:hidden"
           role="toolbar"
