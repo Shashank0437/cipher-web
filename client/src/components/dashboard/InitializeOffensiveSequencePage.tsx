@@ -264,6 +264,8 @@ type ClaudePromptBoxProps = {
   explicitToolNamesCount: number;
   toolExecutionMode: AgentChatToolExecutionMode;
   onToolExecutionModeChange: (v: AgentChatToolExecutionMode) => void;
+  /** When false, “Auto accept” is disabled (must match tenant admin on the server). */
+  allowAutoAcceptTools?: boolean;
 };
 
 function CipherStrikeClaudePromptBox({
@@ -276,6 +278,7 @@ function CipherStrikeClaudePromptBox({
   explicitToolNamesCount,
   toolExecutionMode,
   onToolExecutionModeChange,
+  allowAutoAcceptTools = true,
 }: ClaudePromptBoxProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cannotSubmit = !prompt.trim() || isSending;
@@ -292,8 +295,8 @@ function CipherStrikeClaudePromptBox({
     "inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-left text-[12px] font-semibold shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-primary/30 sm:gap-2 sm:text-[13px]";
 
   return (
-    <div className="overflow-hidden rounded-[1.75rem] border border-outline-variant/55 bg-surface-container-lowest shadow-[0_22px_56px_-30px_rgba(49,39,89,0.42),inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-black/[0.05] transition-colors focus-within:border-primary/40 focus-within:shadow-[0_26px_60px_-28px_rgba(49,39,89,0.52),0_0_0_3px_rgba(104,76,182,0.11)] focus-within:ring-primary/20 sm:rounded-[2rem]">
-      <div className="relative">
+    <div className="rounded-[1.75rem] border border-outline-variant/55 bg-surface-container-lowest shadow-[0_22px_56px_-30px_rgba(49,39,89,0.42),inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-black/[0.05] transition-colors focus-within:border-primary/40 focus-within:shadow-[0_26px_60px_-28px_rgba(49,39,89,0.52),0_0_0_3px_rgba(104,76,182,0.11)] focus-within:ring-primary/20 sm:rounded-[2rem]">
+      <div className="relative overflow-hidden rounded-t-[1.75rem] sm:rounded-t-[2rem]">
         <div
           className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[5.25rem] bg-gradient-to-b from-primary/[0.09] via-primary/[0.03] to-transparent sm:h-[6rem]"
           aria-hidden
@@ -312,7 +315,7 @@ function CipherStrikeClaudePromptBox({
           className="relative z-[1] min-h-[7.25rem] w-full resize-none bg-transparent px-5 pb-2 pt-5 text-[15px] leading-relaxed text-on-surface placeholder:font-medium placeholder:text-on-surface-variant/48 focus:outline-none focus:ring-0 sm:min-h-[7.75rem]"
         />
       </div>
-      <div className="flex items-center justify-between gap-2 border-t border-outline-variant/55 bg-surface-container-low/95 px-2.5 py-2.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-3 sm:px-4 sm:py-3">
+      <div className="flex items-center justify-between gap-2 overflow-visible rounded-b-[1.75rem] border-t border-outline-variant/55 bg-surface-container-low/95 px-2.5 py-2.5 backdrop-blur-[10px] supports-[backdrop-filter]:bg-surface-container-low/82 sm:gap-3 sm:rounded-b-[2rem] sm:px-4 sm:py-3">
         <div
           className="-mx-0.5 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-0.5 [scrollbar-width:none] sm:gap-2.5 [&::-webkit-scrollbar]:hidden"
           role="toolbar"
@@ -352,6 +355,7 @@ function CipherStrikeClaudePromptBox({
           <AgentChatExecModeDropdown
             compact
             menuAlign="end"
+            allowAutoAccept={allowAutoAcceptTools}
             value={toolExecutionMode}
             onChange={onToolExecutionModeChange}
           />
@@ -1610,6 +1614,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     explicitToolNamesCount={explicitToolNames?.length ?? 0}
                     toolExecutionMode={toolExecutionMode}
                     onToolExecutionModeChange={setToolExecutionMode}
+                    allowAutoAcceptTools={isTenantAdmin}
                   />
                 </div>
               </div>
@@ -1628,6 +1633,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               explicitToolNamesCount={explicitToolNames?.length ?? 0}
               toolExecutionMode={toolExecutionMode}
               onToolExecutionModeChange={setToolExecutionMode}
+              allowAutoAcceptTools={isTenantAdmin}
             />
           </div>
           ) : null}

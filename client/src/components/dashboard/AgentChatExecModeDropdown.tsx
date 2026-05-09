@@ -22,6 +22,7 @@ export function AgentChatExecModeDropdown({
   onChange,
   compact,
   menuAlign,
+  allowAutoAccept = true,
 }: {
   value: AgentChatToolExecutionMode;
   onChange: (v: AgentChatToolExecutionMode) => void;
@@ -29,6 +30,8 @@ export function AgentChatExecModeDropdown({
   compact?: boolean;
   /** Popover horizontal alignment relative to the trigger (`end` aligns trailing edges — use in composer footers). */
   menuAlign?: "start" | "end";
+  /** When false, “Auto accept” is disabled (tenant admins only on the server). */
+  allowAutoAccept?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -45,6 +48,30 @@ export function AgentChatExecModeDropdown({
   useEffect(() => {
     if (open) setHighlight(indexOfValue);
   }, [open, indexOfValue]);
+
+  useEffect(() => {
+    if (!allowAutoAccept && value === "auto_accept") {
+      onChange("ask_permission");
+    }
+  }, [allowAutoAccept, value, onChange]);
+
+  const isIndexDisabled = useCallback(
+    (i: number) => OPTIONS[i]?.value === "auto_accept" && !allowAutoAccept,
+    [allowAutoAccept],
+  );
+
+  const moveHighlight = useCallback(
+    (from: number, delta: 1 | -1) => {
+      const n = OPTIONS.length;
+      let i = from;
+      for (let step = 0; step < n; step++) {
+        i = (i + delta + n) % n;
+        if (!isIndexDisabled(i)) return i;
+      }
+      return from;
+    },
+    [isIndexDisabled],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -104,23 +131,25 @@ export function AgentChatExecModeDropdown({
       }
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setHighlight((i) => (i + 1) % OPTIONS.length);
+        setHighlight((i) => moveHighlight(i, 1));
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setHighlight((i) => (i - 1 + OPTIONS.length) % OPTIONS.length);
+        setHighlight((i) => moveHighlight(i, -1));
       }
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         const opt = OPTIONS[highlight];
-        if (opt) pick(opt.value);
+        if (opt && !isIndexDisabled(highlight)) pick(opt.value);
       }
     },
-    [highlight, pick],
+    [highlight, pick, moveHighlight, isIndexDisabled],
   );
 
   const selectionId = `${listboxId}-selection`;
   const align = menuAlign ?? (compact ? "end" : "start");
+  /** Opens below in compact/footer contexts so the panel does not cover the prompt textarea. */
+  const placement = compact ? "below" : "above";
 
   return (
     <div ref={rootRef} className="relative min-w-0">
@@ -174,26 +203,43 @@ export function AgentChatExecModeDropdown({
           aria-labelledby={`${listboxId}-trigger`}
           aria-activedescendant={`${listboxId}-opt-${highlight}`}
           onKeyDown={onListKeyDown}
-          className={`absolute bottom-[calc(100%+8px)] z-[45] max-h-[min(280px,40vh)] overflow-auto rounded-xl border border-outline-variant bg-surface-container-lowest py-1.5 shadow-lg outline-none ring-1 ring-black/[0.04] ${
+          className={`absolute z-[60] max-h-[min(280px,40vh)] overflow-auto rounded-xl border border-outline-variant bg-surface-container-lowest py-1.5 shadow-lg outline-none ring-1 ring-black/[0.04] ${
+            placement === "below" ? "top-[calc(100%+8px)]" : "bottom-[calc(100%+8px)]"
+          } ${
             align === "end"
-              ? "right-0 left-auto w-max min-w-[280px] max-w-[min(calc(100vw-2rem),320px)]"
+              ? compact
+                ? "right-0 left-auto min-w-full max-w-[min(calc(100vw-2rem),320px)]"
+                : "right-0 left-auto w-max min-w-[280px] max-w-[min(calc(100vw-2rem),320px)]"
               : "left-0 w-[min(calc(100vw-2rem),280px)] max-w-[min(calc(100vw-2rem),280px)]"
           }`}
         >
           {OPTIONS.map((opt, i) => {
             const selected = opt.value === value;
             const active = i === highlight;
+            const disabled = isIndexDisabled(i);
             return (
               <li key={opt.value} className="list-none" role="presentation">
                 <div
                   id={`${listboxId}-opt-${i}`}
                   role="option"
                   aria-selected={selected}
-                  onMouseEnter={() => setHighlight(i)}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => pick(opt.value)}
-                  className={`cursor-pointer px-3 py-2.5 outline-none transition-colors ${
-                    active ? "bg-primary-container/50" : "hover:bg-surface-container-high/90"
+                  aria-disabled={disabled}
+                  title={
+                    disabled
+                      ? "Tenant administrator role required to use auto accept"
+                      : undefined
+                  }
+                  onMouseEnter={() => {
+                    if (!disabled) setHighlight(i);
+                  }}
+                  onClick={() => {
+                    if (disabled) return;
+                    pick(opt.value);
+                  }}
+                  className={`px-3 py-2.5 outline-none transition-colors ${
+                    disabled
+                      ? "cursor-not-allowed opacity-55"
+                      : `cursor-pointer ${active ? "bg-primary-container/50" : "hover:bg-surface-container-high/90"}`
                   }`}
                 >
                   <div className="flex items-start gap-2">
