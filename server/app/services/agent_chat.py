@@ -114,10 +114,15 @@ def _prepare_agent_tool_result_for_llm(settings: Settings, result_obj: Any, http
         work["stderr"], _ = _head_tail_truncate(se, max_chars=field_budget, head_fraction=0.2)
 
     summary = _llm_summary_from_result(work, http_status)
+    # Avoid duplicating scalar run metadata: those fields live under ``_llm_summary`` only.
+    _summary_keys = frozenset(
+        {"http_status", "return_code", "exit_code", "partial_results", "success", "execution_time"}
+    )
     ordered: dict[str, Any] = {"_llm_summary": summary}
     for k, v in work.items():
-        if k != "_llm_summary":
-            ordered[k] = v
+        if k == "_llm_summary" or k in _summary_keys:
+            continue
+        ordered[k] = v
 
     text = json.dumps(ordered, indent=2)
     if len(text) <= max_c:

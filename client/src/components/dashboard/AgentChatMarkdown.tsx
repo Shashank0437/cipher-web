@@ -16,7 +16,7 @@ const components: Components = {
     if (block) {
       return (
         <code
-          className="block max-h-[min(320px,50vh)] overflow-x-auto overflow-y-auto rounded-lg bg-surface-container-high px-3 py-2 font-mono text-[12px] text-on-surface"
+          className="block min-w-0 max-h-[min(320px,50vh)] overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words break-all rounded-lg bg-surface-container-high px-3 py-2 font-mono text-[12px] text-on-surface [overflow-wrap:anywhere]"
           {...props}
         >
           {children}
@@ -158,7 +158,7 @@ export function AgentChatMarkdown({ text, className, collapseToolExecutions = tr
         return (
           <details
             key={`tool-${i}`}
-            className="group my-2 w-full overflow-hidden rounded-lg border border-outline-variant/45 bg-surface-container-lowest/70 ring-1 ring-outline-variant/30"
+            className="group my-2 w-full min-w-0 overflow-hidden rounded-lg border border-outline-variant/45 bg-surface-container-lowest/70 ring-1 ring-outline-variant/30"
           >
             <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
               <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={summaryTitle}>
@@ -166,7 +166,7 @@ export function AgentChatMarkdown({ text, className, collapseToolExecutions = tr
               </span>
               <ToolDetailsChevron className="shrink-0 text-on-surface-variant transition-transform duration-200 group-open:rotate-180" />
             </summary>
-            <div className="max-h-[min(320px,50vh)] overflow-y-auto border-t border-outline-variant/35 px-2 py-2">
+            <div className="min-w-0 max-h-[min(320px,50vh)] overflow-y-auto border-t border-outline-variant/35 px-2 py-2">
               <ReactMarkdown components={components}>{seg.fullBlock}</ReactMarkdown>
             </div>
           </details>

@@ -75,6 +75,24 @@ function formatChatError(err: unknown): string {
   return "Something went wrong.";
 }
 
+/** Same JSON is stored on the assistant ``[Tool executed: …]`` row and again as a ``tool`` message — hide the duplicate row in the transcript. */
+function isRedundantToolResultEcho(previousMessage: AgentChatMessage | undefined, toolContent: string): boolean {
+  if (!previousMessage || previousMessage.role !== "assistant") return false;
+  const prev = previousMessage.content ?? "";
+  if (!prev.includes("[Tool executed:")) return false;
+  const re = /\[Tool executed:[\s\S]*?Result:\s*\n```json\s*\n([\s\S]*?)\n```/;
+  const match = prev.match(re);
+  if (!match) return false;
+  const embedded = match[1].trim();
+  const tool = toolContent.trim();
+  if (embedded === tool) return true;
+  try {
+    return JSON.stringify(JSON.parse(embedded)) === JSON.stringify(JSON.parse(tool));
+  } catch {
+    return false;
+  }
+}
+
 function batchAwaitingQuorum(m: AgentChatMessage): boolean {
   const slots = m.tool_calls;
   return Array.isArray(slots) && slots.length > 0 && m.batch_execution_state === "awaiting_quorum";
@@ -1238,7 +1256,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                   {messagesLoading && visibleMessages.length === 0 ? (
                     <p className="text-[13px] text-on-surface-variant">Loading messages…</p>
                   ) : null}
-                  {visibleMessages.map((m) => (
+                  {visibleMessages.map((m, idx) => {
+                    if (m.role === "tool" && isRedundantToolResultEcho(visibleMessages[idx - 1], m.content)) {
+                      return null;
+                    }
+                    return (
                     <div
                       key={m.id}
                       className={`flex flex-col gap-2 ${
@@ -1290,14 +1312,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           m.role === "user"
                             ? "rounded-[1.35rem] bg-primary-container px-4 py-2.5 text-[14px] leading-relaxed text-on-primary-container"
                             : m.role === "tool"
-                              ? "border-l-2 border-outline-variant/45 py-2 pl-3 font-mono text-[12px] leading-relaxed text-on-surface-variant"
+                              ? "min-w-0 max-w-full border-l-2 border-outline-variant/45 py-2 pl-3 font-mono text-[12px] leading-relaxed text-on-surface-variant [overflow-wrap:anywhere]"
                               : "py-1 text-[15px] leading-[1.75] text-on-surface"
                         }
                       >
                         {m.role === "assistant" ? (
                           <AgentChatMarkdown text={m.content} />
                         ) : (
-                          <p className="whitespace-pre-wrap break-words">{m.content}</p>
+                          <p className="whitespace-pre-wrap break-words break-all">{m.content}</p>
                         )}
                       </div>
                       {m.role === "assistant" && batchPanelOpen(m)
@@ -1553,13 +1575,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           })()
                         : null}
                     </div>
-                  ))}
+                  );
+                  })}
                   {(reasoningStreaming || streamReasoning.length > 0) && (
                     <details className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]">
                       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
                         <span>
                           {reasoningStreaming
-                            ? "Thinking…"
+                            ? "Thinking"
                             : streamThoughtSeconds != null
                               ? `Thought for ${streamThoughtSeconds}s`
                               : "Thought"}
