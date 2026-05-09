@@ -33,6 +33,7 @@ from app.services.tool_run_stream import drain_tool_run_stream
 logger = logging.getLogger(__name__)
 
 _MAX_AGENT_CHAT_THINKING_CHARS = 100_000
+_MAX_LLM_TOOL_SCHEMAS_STORE_BYTES = 400_000
 _TOOL_LOG_TAIL_MAX_BYTES = 32 * 1024
 
 # Nmap (and similar) spam stdout with periodic Stats / timing lines — drop before LLM sizing.
@@ -281,6 +282,23 @@ def _trim_thinking_for_store(raw: str | None) -> str | None:
     return t
 
 
+def _trim_llm_tool_schemas_for_store(schemas: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    if not schemas:
+        return None
+    out: list[dict[str, Any]] = [s for s in schemas if isinstance(s, dict)]
+    if not out:
+        return None
+    while out:
+        try:
+            blob = json.dumps(out, default=str).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        if len(blob) <= _MAX_LLM_TOOL_SCHEMAS_STORE_BYTES:
+            return out
+        out = out[:-1]
+    return None
+
+
 def _parse_think_token_payload(rest: str) -> str:
     rest = rest.strip()
     if not rest:
@@ -487,16 +505,64 @@ def _fallback_security_tool_names(by_name: dict[str, dict[str, Any]], limit: int
     return out
 
 
+_SHORT_TOOL_APPROVAL_RE = re.compile(
+    r"\b(run|scan|execute|approve|yes|yep|yeah|ok|okay|continue|go|start|launch|pentest|"
+    r"nmap|httpx|nuclei|ffuf|gobuster|sqlmap|nikto|burp|curl)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_short_tool_approval(message: str) -> bool:
+    lower = message.lower().strip()
+    if "http://" in lower or "https://" in lower:
+        return True
+    return bool(_SHORT_TOOL_APPROVAL_RE.search(message))
+
+
 def _is_conversational(message: str) -> bool:
     lower = message.lower().strip()
     if _looks_operational_security(lower):
         return False
-    if len(lower) < 20:
-        return True
+    if _looks_like_short_tool_approval(message):
+        return False
     for pat in _CONVERSATIONAL_PATTERNS:
         if lower.startswith(pat) or f" {pat}" in lower:
             return True
+    if len(lower) < 20:
+        return True
     return False
+
+
+def session_suggests_security_follow_up(rows: list[dict[str, Any]], *, tail: int = 18) -> bool:
+    buf = ""
+    for m in rows[-tail:]:
+        buf += str(m.get("content") or "") + "\n"
+    lower = buf.lower()
+    if "http://" in lower or "https://" in lower:
+        return True
+    if "[tool executed" in lower or "tool call requested" in lower or "tool batch pending" in lower:
+        return True
+    return any(h in lower for h in _OPERATIONAL_SECURITY_HINTS)
+
+
+def _augment_router_user_message(rows: list[dict[str, Any]], current: str, *, max_chars: int = 800) -> str:
+    texts: list[str] = []
+    seen: set[str] = set()
+    for m in reversed(rows):
+        if str(m.get("role")) != "user":
+            continue
+        t = str(m.get("content") or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        texts.append(t)
+        if len(texts) >= 6:
+            break
+    texts.reverse()
+    block = "\n\n".join(texts)
+    if len(block) > max_chars:
+        block = block[-max_chars:]
+    return f"{block}\n\n[Latest user message]\n{current}".strip()
 
 
 def _utc_now() -> datetime:
@@ -608,6 +674,7 @@ async def insert_message(
     llm_messages_snapshot: list[dict[str, Any]] | None = None,
     thinking_content: str | None = None,
     routing: dict[str, Any] | None = None,
+    llm_tool_schemas: list[dict[str, Any]] | None = None,
 ) -> ObjectId:
     doc: dict[str, Any] = {
         "organization_id": organization_id,
@@ -626,6 +693,9 @@ async def insert_message(
         doc["batch_execution_state"] = batch_execution_state
     if llm_messages_snapshot is not None:
         doc["llm_messages_snapshot"] = llm_messages_snapshot
+    ts_store = _trim_llm_tool_schemas_for_store(llm_tool_schemas)
+    if ts_store is not None:
+        doc["llm_tool_schemas"] = ts_store
     tc_store = _trim_thinking_for_store(thinking_content)
     if tc_store is not None:
         doc["thinking_content"] = tc_store
@@ -1006,6 +1076,70 @@ async def plan_router_turn(
     )
 
 
+async def maybe_upgrade_router_result_for_llm(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    rows: list[dict[str, Any]],
+    user_message: str,
+    explicit_tool_names: list[str] | None,
+    rt: RouterTurnResult,
+) -> RouterTurnResult:
+    """Re-route or attach fallback schemas when the first router pass would stream the LLM without tool schemas."""
+    explicit = bool(explicit_tool_names)
+    conv_gap = (
+        rt.intent == "conversational"
+        and not (rt.router_reply or "").strip()
+        and (explicit or session_suggests_security_follow_up(rows))
+    )
+    op_no_schema = rt.intent == "operational" and not rt.schemas
+    if not (conv_gap or op_no_schema):
+        return rt
+
+    meta = dict(rt.meta or {})
+    augmented = _augment_router_user_message(rows, user_message.strip())
+    rt2 = await plan_router_turn(
+        settings,
+        db,
+        organization_id=organization_id,
+        user_message=augmented,
+        explicit_tool_names=explicit_tool_names,
+    )
+    if rt2.intent == "operational" and rt2.schemas:
+        meta.update(rt2.meta or {})
+        meta["router_recovery"] = "augmented_user_message"
+        return RouterTurnResult("operational", rt2.schemas, rt2.router_reply, meta)
+
+    allow_catalog_fallback = op_no_schema or explicit or _looks_like_short_tool_approval(user_message)
+    if not allow_catalog_fallback:
+        meta["router_recovery"] = "skipped_fallback_not_action_like"
+        return rt
+
+    ctx = await _load_chat_tool_maps(settings, db, organization_id=organization_id)
+    if ctx is None:
+        meta["router_recovery"] = "failed_no_catalog"
+        return RouterTurnResult(rt.intent, rt.schemas, rt.router_reply, meta)
+
+    by_name, _ = ctx
+    max_pick = max(1, settings.agent_router_max_tools)
+    objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "schema_recovery_fallback")
+    if not objs:
+        meta["router_recovery"] = "fallback_no_matching_tools"
+        return RouterTurnResult("operational", None, rt.router_reply, meta)
+
+    merged = await _bridge_fetch_tool_schemas(
+        settings,
+        objs,
+        timeout_seconds=settings.agent_timeout_seconds,
+        meta=meta,
+        router_reply=None,
+    )
+    mm = dict(merged.meta or {})
+    mm["router_recovery"] = mm.get("router_recovery") or "fallback_fetch"
+    return RouterTurnResult("operational", merged.schemas, merged.router_reply, mm)
+
+
 async def stream_cipherstrike_turn(
     settings: Settings,
     llm_messages: list[dict[str, Any]],
@@ -1095,6 +1229,7 @@ async def stream_cipherstrike_turn(
                             tenant_roles=roles,
                             batch_message_id=None,
                             carry_thinking=carry_pre_tool_thinking,
+                            tool_schemas=tool_schemas,
                         ):
                             yield line
                         skip_outer_yield = True
@@ -1115,6 +1250,7 @@ async def stream_cipherstrike_turn(
                             llm_messages_snapshot=list(llm_messages),
                             thinking_content="".join(thinking_chunks) or None,
                             routing=routing,
+                            llm_tool_schemas=tool_schemas,
                         )
                         thinking_chunks.clear()
                         out_payload = {"assistant_message_id": str(mid), "calls": calls}
@@ -1145,6 +1281,7 @@ async def stream_cipherstrike_turn(
                             endpoint=endpoint,
                             tenant_roles=roles,
                             carry_thinking=carry_pre_tool_thinking,
+                            follow_tool_schemas=tool_schemas,
                         ):
                             yield line
                         skip_outer_yield = True
@@ -1171,6 +1308,7 @@ async def stream_cipherstrike_turn(
                             llm_messages_snapshot=list(llm_messages),
                             thinking_content="".join(thinking_chunks) or None,
                             routing=routing,
+                            llm_tool_schemas=tool_schemas,
                         )
                         thinking_chunks.clear()
                         pending_data["assistant_message_id"] = str(mid)
@@ -1451,6 +1589,7 @@ async def execute_tool_slots_follow_up(
     tenant_roles: list[str],
     batch_message_id: ObjectId | None = None,
     carry_thinking: str | None = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     """Persist executions for each slot (approve/reject/blocked), optionally patch batch parent row, stream LLM follow-up."""
     needs_exec = any(str(s.get("human_decision") or "").lower() == "approve" for s in slots)
@@ -1462,6 +1601,19 @@ async def execute_tool_slots_follow_up(
     from app.services.organization_tools import get_disabled_tool_names
 
     disabled = await get_disabled_tool_names(db, organization_id)
+
+    resolved_follow_schemas: list[dict[str, Any]] | None = tool_schemas
+    if resolved_follow_schemas is None and batch_message_id is not None:
+        parent_doc = await get_message_owned(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            message_id=batch_message_id,
+        )
+        raw_ts = parent_doc.get("llm_tool_schemas") if parent_doc else None
+        if isinstance(raw_ts, list):
+            resolved_follow_schemas = [x for x in raw_ts if isinstance(x, dict)] or None
 
     ordered = sorted(slots, key=lambda s: int(s.get("slot_index", 0)))
 
@@ -1779,6 +1931,7 @@ async def execute_tool_slots_follow_up(
         session_id=session_id,
         llm_messages=follow_llm,
         carry_thinking=carry_thinking,
+        tool_schemas=resolved_follow_schemas,
     ):
         yield chunk
 
@@ -1796,6 +1949,7 @@ async def _auto_execute_single_tool_sse(
     endpoint: str,
     tenant_roles: list[str],
     carry_thinking: str | None = None,
+    follow_tool_schemas: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     if "tenant_admin" not in (tenant_roles or []):
         yield "data: [ERROR] Tenant administrator role required for automatic tool execution\n\n"
@@ -1832,6 +1986,7 @@ async def _auto_execute_single_tool_sse(
             session_id=session_id,
             llm_messages=follow_llm,
             carry_thinking=carry_thinking,
+            tool_schemas=follow_tool_schemas,
         ):
             yield chunk
         return
@@ -1873,6 +2028,7 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         llm_messages=follow_msgs,
         carry_thinking=carry_thinking,
+        tool_schemas=follow_tool_schemas,
     ):
         yield chunk
 
@@ -1945,9 +2101,12 @@ async def stream_follow_up_after_tool(
     session_id: ObjectId,
     llm_messages: list[dict[str, Any]],
     carry_thinking: str | None = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     timeout = settings.agent_llm_stream_timeout_seconds
-    body = {"messages": llm_messages}
+    body: dict[str, Any] = {"messages": llm_messages}
+    if tool_schemas:
+        body["schemas"] = tool_schemas
     assistant_chunks: list[str] = []
     thinking_chunks: list[str] = []
     if carry_thinking and str(carry_thinking).strip():

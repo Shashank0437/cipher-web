@@ -42,6 +42,7 @@ from app.services.agent_chat import (
     list_messages,
     list_sessions,
     maybe_refresh_conversation_summary,
+    maybe_upgrade_router_result_for_llm,
     merge_tool_batch_decisions,
     plan_router_turn,
     rename_session,
@@ -302,6 +303,16 @@ async def post_message_stream(
                 logger.exception("plan_router_turn")
                 rt = RouterTurnResult("operational", None, None, {})
 
+            rt = await maybe_upgrade_router_result_for_llm(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+                rows=rows,
+                user_message=body.message.strip(),
+                explicit_tool_names=explicit_tools if explicit_tools else None,
+                rt=rt,
+            )
+
             if rt.intent == "conversational" and (rt.router_reply or "").strip():
                 text = rt.router_reply.strip()
                 step = 72
@@ -451,6 +462,9 @@ async def tool_confirm_stream(
     endpoint = normalize_agent_tool_path(str(tc.get("endpoint") or ""))
     args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
 
+    raw_follow_ts = msg.get("llm_tool_schemas")
+    follow_tool_schemas = raw_follow_ts if isinstance(raw_follow_ts, list) else None
+
     if body.approved:
         roles = user.get("roles") or []
         if "tenant_admin" not in roles:
@@ -483,6 +497,7 @@ async def tool_confirm_stream(
                     user_id=user["_id"],
                     session_id=sid,
                     llm_messages=follow_msgs,
+                    tool_schemas=follow_tool_schemas,
                 ):
                     yield chunk
                 return
@@ -655,6 +670,7 @@ async def tool_confirm_stream(
                 user_id=user["_id"],
                 session_id=sid,
                 llm_messages=follow_msgs,
+                tool_schemas=follow_tool_schemas,
             ):
                 yield chunk
         except AgentUnreachableError as e:
