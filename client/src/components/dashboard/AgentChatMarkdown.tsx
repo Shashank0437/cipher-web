@@ -1,5 +1,6 @@
 "use client";
 
+import { Fragment } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 
@@ -48,18 +49,129 @@ const components: Components = {
   hr: () => <hr className="my-3 border-outline-variant/60" />,
 };
 
+/** Matches persisted assistant tool rows from `agent_chat` (server template). */
+const TOOL_EXECUTED_BLOCK_RE =
+  /\[Tool executed: \*\*([^\*]+)\*\*\]\s*\nArguments: `([^`]*)`\s*\nResult:\s*\n```json\s*\n([\s\S]*?)\n```/g;
+
+type ParsedSegment =
+  | { type: "markdown"; text: string }
+  | { type: "tool"; toolName: string; argsRaw: string; fullBlock: string };
+
+function parseToolExecutionRecords(text: string): ParsedSegment[] {
+  const segments: ParsedSegment[] = [];
+  let last = 0;
+  const re = new RegExp(TOOL_EXECUTED_BLOCK_RE.source, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      segments.push({ type: "markdown", text: text.slice(last, m.index) });
+    }
+    segments.push({
+      type: "tool",
+      toolName: m[1].trim(),
+      argsRaw: m[2],
+      fullBlock: m[0],
+    });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    segments.push({ type: "markdown", text: text.slice(last) });
+  }
+  return segments;
+}
+
+function truncateOneLine(s: string, maxChars: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  if (t.length <= maxChars) return t;
+  return `${t.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function ToolDetailsChevron({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width={18}
+      height={18}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+    >
+      <path
+        d="M6 9l6 6 6-6"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 type Props = {
   text: string;
   className?: string;
+  /** When true (default), each complete `[Tool executed: **…**] … ```json` block is wrapped in collapsed `<details>`. */
+  collapseToolExecutions?: boolean;
 };
 
 /** Renders model text as Markdown (bold, lists, code, links). Safe: no raw HTML execution. */
-export function AgentChatMarkdown({ text, className }: Props) {
+export function AgentChatMarkdown({ text, className, collapseToolExecutions = true }: Props) {
   const trimmed = text.trim();
   if (!trimmed) return null;
+
+  if (!collapseToolExecutions) {
+    return (
+      <div className={className}>
+        <ReactMarkdown components={components}>{trimmed}</ReactMarkdown>
+      </div>
+    );
+  }
+
+  const segments = parseToolExecutionRecords(trimmed);
+  const onlyMarkdown =
+    segments.length === 0 ||
+    (segments.length === 1 && segments[0].type === "markdown");
+
+  if (onlyMarkdown) {
+    return (
+      <div className={className}>
+        <ReactMarkdown components={components}>{trimmed}</ReactMarkdown>
+      </div>
+    );
+  }
+
   return (
     <div className={className}>
-      <ReactMarkdown components={components}>{trimmed}</ReactMarkdown>
+      {segments.map((seg, i) => {
+        if (seg.type === "markdown") {
+          const md = seg.text.trim();
+          if (!md) return null;
+          return (
+            <Fragment key={`md-${i}`}>
+              <ReactMarkdown components={components}>{md}</ReactMarkdown>
+            </Fragment>
+          );
+        }
+        const argsPreview = truncateOneLine(seg.argsRaw, 72);
+        const summaryTitle = argsPreview ? `Tool: ${seg.toolName} · ${argsPreview}` : `Tool: ${seg.toolName}`;
+        return (
+          <details
+            key={`tool-${i}`}
+            className="group my-2 w-full overflow-hidden rounded-lg border border-outline-variant/45 bg-surface-container-lowest/70 ring-1 ring-outline-variant/30"
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={summaryTitle}>
+                {summaryTitle}
+              </span>
+              <ToolDetailsChevron className="shrink-0 text-on-surface-variant transition-transform duration-200 group-open:rotate-180" />
+            </summary>
+            <div className="max-h-[min(320px,50vh)] overflow-y-auto border-t border-outline-variant/35 px-2 py-2">
+              <ReactMarkdown components={components}>{seg.fullBlock}</ReactMarkdown>
+            </div>
+          </details>
+        );
+      })}
     </div>
   );
 }
