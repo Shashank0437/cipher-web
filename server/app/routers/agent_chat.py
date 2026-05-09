@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -532,8 +533,45 @@ async def tool_confirm_stream(
             )
             await _sse_flush_tick()
 
+            prog_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def enqueue_progress(body: dict[str, Any]) -> None:
+                await prog_q.put(body)
+
+            async def run_tool() -> tuple[str, dict[str, Any], int]:
+                return await _run_one_tool_detailed(
+                    settings,
+                    endpoint,
+                    args,
+                    emit_slot_progress=enqueue_progress,
+                    progress_context={
+                        "slot_index": 0,
+                        "tool_name": tool_name,
+                        "started_at": started_iso,
+                    },
+                )
+
+            exec_task = asyncio.create_task(run_tool())
+            idle_rounds = 0
             try:
-                result_text, prog, _http_status = await _run_one_tool_detailed(settings, endpoint, args)
+                while True:
+                    try:
+                        partial = await asyncio.wait_for(prog_q.get(), timeout=0.08)
+                        idle_rounds = 0
+                        yield _sse_tool_batch_slot_progress(aid, partial)
+                        await _sse_flush_tick()
+                    except asyncio.TimeoutError:
+                        idle_rounds += 1
+                        if exec_task.done() and idle_rounds >= 4:
+                            break
+                while True:
+                    try:
+                        partial = await asyncio.wait_for(prog_q.get(), timeout=0.02)
+                        yield _sse_tool_batch_slot_progress(aid, partial)
+                        await _sse_flush_tick()
+                    except asyncio.TimeoutError:
+                        break
+                result_text, prog, _http_status = exec_task.result()
             except Exception as exc:
                 logger.exception("tool_confirm_stream execute %s", tool_name)
                 fin_iso = _utc_now_iso()

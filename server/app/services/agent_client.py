@@ -204,3 +204,31 @@ async def agent_post_sse_stream(
         raise AgentUnreachableError(f"Timed out streaming from agent after {timeout_seconds}s") from None
     except httpx.RequestError as e:
         raise AgentUnreachableError(f"Cannot reach agent: {e}") from None
+
+
+def forward_agent_internal_tool_run_sync(
+    settings: Settings,
+    catalog_path: str,
+    payload: dict[str, Any] | None,
+    stream_run_id: str,
+) -> tuple[int, bytes]:
+    """POST ``/api/internal/tool-run`` (blocking). Agent subprocess logs may stream to Redis in parallel."""
+    base = _normalized_base(settings)
+    if not base:
+        raise AgentUnreachableError("Agent URL is empty (set AGENT_MICROSERVICE_URL or AGENT_BASE_URL)")
+    timeout = httpx.Timeout(settings.agent_tool_run_timeout_seconds)
+    headers = {**_headers(settings), "Content-Type": "application/json"}
+    ep = normalize_agent_tool_path(catalog_path)
+    url = urljoin(base, "api/internal/tool-run")
+    body = {"path": ep, "json": payload if payload else {}, "stream_run_id": stream_run_id}
+    try:
+        with httpx.Client(timeout=timeout, headers=headers) as client:
+            r = client.post(url, json=body)
+    except httpx.TimeoutException:
+        raise AgentUnreachableError(
+            f"Timed out running internal tool on agent after {settings.agent_tool_run_timeout_seconds}s",
+        ) from None
+    except httpx.RequestError as e:
+        raise AgentUnreachableError(f"Cannot reach agent: {e}") from e
+
+    return r.status_code, r.content

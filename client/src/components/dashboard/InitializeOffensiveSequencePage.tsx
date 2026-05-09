@@ -1484,41 +1484,49 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                               singleToolSlotFromMessage(m),
                               liveBatchSlotOverlay,
                             );
+                            /** Server keeps tool_call.state pending until finish; run_status is set when execution starts. */
+                            const awaitingApproval = !String(mergedSingle.run_status ?? "").trim();
                             const showRunChip =
                               confirmingId === m.id ||
                               Boolean(String(mergedSingle.run_status ?? "").trim());
                             return (
                               <div className="w-full max-w-md rounded-xl border border-primary/25 bg-primary-container/30 px-4 py-3">
-                                <p className="text-[12px] font-bold text-primary">Tool approval required</p>
+                                <p className="text-[12px] font-bold text-primary">
+                                  {awaitingApproval ? "Tool approval required" : "Tool execution"}
+                                </p>
                                 <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
                                   {String(m.tool_call.tool_name ?? "")}
                                 </p>
-                                <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-surface-container-lowest p-2 text-[11px] text-on-surface">
-                                  {JSON.stringify(m.tool_call.arguments ?? {}, null, 2)}
-                                </pre>
-                                <div className="mt-3 flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={!isTenantAdmin || confirmingId !== null}
-                                    title={
-                                      isTenantAdmin
-                                        ? "Run this tool via the NyxStrike agent"
-                                        : "Tenant administrator role required"
-                                    }
-                                    onClick={() => void handleToolConfirm(m.id, true)}
-                                    className="rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
-                                  >
-                                    {confirmingId === m.id ? "Running…" : "Approve"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={confirmingId !== null}
-                                    onClick={() => void handleToolConfirm(m.id, false)}
-                                    className="rounded-full border border-outline-variant bg-surface-container-high px-4 py-2 text-[13px] font-semibold text-on-surface disabled:opacity-45"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
+                                {awaitingApproval ? (
+                                  <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-surface-container-lowest p-2 text-[11px] text-on-surface">
+                                    {JSON.stringify(m.tool_call.arguments ?? {}, null, 2)}
+                                  </pre>
+                                ) : null}
+                                {awaitingApproval ? (
+                                  <div className="mt-3 flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={!isTenantAdmin || confirmingId !== null}
+                                      title={
+                                        isTenantAdmin
+                                          ? "Run this tool via the NyxStrike agent"
+                                          : "Tenant administrator role required"
+                                      }
+                                      onClick={() => void handleToolConfirm(m.id, true)}
+                                      className="rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
+                                    >
+                                      {confirmingId === m.id ? "Running…" : "Approve"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={confirmingId !== null}
+                                      onClick={() => void handleToolConfirm(m.id, false)}
+                                      className="rounded-full border border-outline-variant bg-surface-container-high px-4 py-2 text-[13px] font-semibold text-on-surface disabled:opacity-45"
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                ) : null}
                                 {showRunChip ? (
                                   <div className="mt-2 flex flex-wrap items-center gap-2">
                                     <span className="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
@@ -1531,7 +1539,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                                   </div>
                                 ) : null}
                                 <BatchExecLogPanel slot={mergedSingle} />
-                                {!isTenantAdmin ? (
+                                {awaitingApproval && !isTenantAdmin ? (
                                   <p className="mt-2 text-[11px] text-on-surface-variant">
                                     Approvals require the tenant administrator role. You can still reject.
                                   </p>

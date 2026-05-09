@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7
 
+    # When True (default), chat tool execution uses Redis Streams for live stdout/stderr tails (requires Redis + agent support).
+    agent_tool_log_streams_enabled: bool = Field(default=True)
+
     admin_api_key: str = ""  # required for /admin/* when set; if empty, admin routes reject
 
     frontend_url: str = "http://localhost:3000"

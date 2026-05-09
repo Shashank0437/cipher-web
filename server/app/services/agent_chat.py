@@ -5,24 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import Settings
 from app.constants import AGENT_CHAT_MESSAGES_COLLECTION, AGENT_CHAT_SESSIONS_COLLECTION
+from app.redis_client import get_redis
 from app.services.agent_client import (
     AgentUnreachableError,
     agent_path_not_allowed,
     agent_post_json,
     agent_post_sse_stream,
     fetch_agent_health_and_catalog,
+    forward_agent_internal_tool_run_sync,
     forward_agent_post_tool,
     normalize_agent_tool_path,
 )
+from app.services.tool_run_stream import drain_tool_run_stream
 
 logger = logging.getLogger(__name__)
 
@@ -1177,8 +1181,15 @@ async def _run_one_tool_detailed(
     settings: Settings,
     endpoint: str,
     args: dict[str, Any],
+    *,
+    emit_slot_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    progress_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], int]:
-    """Run one catalog tool via agent HTTP; returns (json_for_llm, progress_fields_for_slot, http_status_code)."""
+    """Run one catalog tool via agent HTTP; returns (json_for_llm, progress_fields_for_slot, http_status_code).
+
+    When ``emit_slot_progress`` and ``progress_context`` are set and ``agent_tool_log_streams_enabled``,
+    uses ``POST /api/internal/tool-run`` plus Redis Streams for rolling stdout/stderr tails during execution.
+    """
     ep = normalize_agent_tool_path(endpoint)
     if agent_path_not_allowed(ep):
         err_obj: dict[str, Any] = {"error": "Tool endpoint is not allowed."}
@@ -1195,9 +1206,109 @@ async def _run_one_tool_detailed(
         }
         return json.dumps(err_obj), meta, 403
 
-    status_code, content, _ctype = await forward_agent_post_tool(settings, ep, args)
+    use_live = (
+        emit_slot_progress is not None
+        and isinstance(progress_context, dict)
+        and str(progress_context.get("tool_name") or "").strip() != ""
+        and bool(getattr(settings, "agent_tool_log_streams_enabled", True))
+    )
+
+    if not use_live:
+        status_code, content, _ctype = await forward_agent_post_tool(settings, ep, args)
+        try:
+            result_obj: Any = json.loads(content.decode("utf-8"))
+        except Exception:
+            raw = content.decode("utf-8", errors="replace")[:4000]
+            result_obj = {"http_status": status_code, "raw": raw}
+        result_text = json.dumps(result_obj, indent=2)
+        if len(result_text) > 4000:
+            result_text = result_text[:4000] + "\n… (truncated)"
+        meta = _progress_from_completed_run(status_code, result_obj)
+        return result_text, meta, status_code
+
+    emit_cb = emit_slot_progress
+    assert emit_cb is not None
+    assert isinstance(progress_context, dict)
+
+    slot_index = int(progress_context.get("slot_index", 0))
+    tool_name = str(progress_context.get("tool_name") or "")
+    started_at = progress_context.get("started_at")
+    started_at_str = started_at if isinstance(started_at, str) else None
+
+    rid = uuid.uuid4().hex
+    stdout_acc = ""
+    stderr_acc = ""
+    emit_times: list[float] = [0.0]
+
+    async def emit_accumulated(*, force: bool = False) -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if not force and (now - emit_times[0]) < 0.1:
+            return
+        emit_times[0] = now
+        out_tail, out_trunc = _truncate_tool_log_tail(stdout_acc if stdout_acc else None)
+        err_tail, err_trunc = _truncate_tool_log_tail(stderr_acc if stderr_acc else None)
+        await emit_cb(
+            _slot_progress_payload(
+                slot_index=slot_index,
+                tool_name=tool_name,
+                run_status="running",
+                stdout_tail=out_tail,
+                stderr_tail=err_tail,
+                stdout_truncated=out_trunc,
+                stderr_truncated=err_trunc,
+                exit_code=None,
+                http_status=None,
+                started_at=started_at_str,
+                finished_at=None,
+            )
+        )
+
+    async def on_chunk(evt: dict[str, Any]) -> None:
+        nonlocal stdout_acc, stderr_acc
+        t = evt.get("type")
+        if t == "terminal":
+            return
+        if t == "stdout":
+            stdout_acc += str(evt.get("text") or "")
+            await emit_accumulated()
+        elif t == "stderr":
+            stderr_acc += str(evt.get("text") or "")
+            await emit_accumulated()
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(forward_agent_internal_tool_run_sync, settings, ep, args, rid),
+    )
     try:
-        result_obj: Any = json.loads(content.decode("utf-8"))
+        await drain_tool_run_stream(get_redis(), rid, run_task, on_chunk=on_chunk)
+    except Exception:
+        logger.exception("tool_run_stream drain failed for tool=%s", tool_name)
+    finally:
+        await run_task
+
+    await emit_accumulated(force=True)
+
+    try:
+        status_code, content = run_task.result()
+    except AgentUnreachableError:
+        raise
+    except Exception as exc:
+        logger.exception("internal tool run failed for tool=%s", tool_name)
+        se_t, se_tr = _truncate_tool_log_tail(str(exc))
+        meta = {
+            "run_status": "error",
+            "stdout_tail": None,
+            "stderr_tail": se_t,
+            "stdout_truncated": False,
+            "stderr_truncated": se_tr,
+            "exit_code": None,
+            "http_status": None,
+            "run_finished_at": _utc_now_iso(),
+        }
+        return json.dumps({"error": str(exc)}), meta, 500
+
+    try:
+        result_obj = json.loads(content.decode("utf-8"))
     except Exception:
         raw = content.decode("utf-8", errors="replace")[:4000]
         result_obj = {"http_status": status_code, "raw": raw}
@@ -1328,8 +1439,22 @@ async def execute_tool_slots_follow_up(
         args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
         started = _utc_now_iso()
         await prog_q.put(("running", idx, tn, started))
+
+        async def emit_live(payload: dict[str, Any]) -> None:
+            await prog_q.put(("stream_progress", idx, tn, payload))
+
         try:
-            result_text, prog, _http = await _run_one_tool_detailed(settings, endpoint, args)
+            result_text, prog, _http = await _run_one_tool_detailed(
+                settings,
+                endpoint,
+                args,
+                emit_slot_progress=emit_live,
+                progress_context={
+                    "slot_index": idx,
+                    "tool_name": tn,
+                    "started_at": started,
+                },
+            )
         except Exception as exc:
             logger.exception("batch tool %s", tn)
             se_t, se_tr = _truncate_tool_log_tail(str(exc))
@@ -1392,6 +1517,23 @@ async def execute_tool_slots_follow_up(
                         finished_at=None,
                     ),
                 )
+                await _sse_flush_tick()
+        elif kind == "stream_progress":
+            idx_sp = int(rest[0])
+            body = dict(rest[2])
+            patch_sp = {
+                "run_status": str(body.get("run_status") or "running"),
+                "stdout_tail": body.get("stdout_tail"),
+                "stderr_tail": body.get("stderr_tail"),
+                "stdout_truncated": bool(body.get("stdout_truncated")),
+                "stderr_truncated": bool(body.get("stderr_truncated")),
+                "exit_code": body.get("exit_code"),
+                "http_status": body.get("http_status"),
+            }
+            _merge_slot_patch(working_slots, idx_sp, patch_sp)
+            await persist_working_if_batch()
+            if batch_message_id is not None:
+                yield _sse_tool_batch_slot_progress(batch_message_id, body)
                 await _sse_flush_tick()
         elif kind == "finished":
             idx = int(rest[0])
