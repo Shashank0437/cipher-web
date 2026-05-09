@@ -1,7 +1,8 @@
 /**
  * Base URL for the FastAPI server.
- * - If `NEXT_PUBLIC_API_URL` is set, use it (direct calls to Uvicorn).
- * - Otherwise the browser uses same-origin `/be` (proxied by Next.js to the Python API).
+ * - If `NEXT_PUBLIC_API_URL` is set, use it (direct calls to Uvicorn — best for debugging).
+ * - Otherwise the browser uses same-origin `/be`, proxied by `app/be/[[...path]]/route.ts`
+ *   (streaming-safe; plain Next rewrites buffer SSE).
  * - During SSR, falls back to `INTERNAL_API_URL` or `http://127.0.0.1:8000`.
  */
 export function getApiBase(): string {

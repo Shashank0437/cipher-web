@@ -97,7 +97,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
 
         <div className="shrink-0 px-6 pb-4 pt-2">
           <Link
-            href="/dashboard/scan"
+            href="/dashboard/scan?new=1"
             className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 text-sm font-bold text-on-primary shadow-sm transition hover:opacity-90 active:scale-[0.99]"
           >
             <MaterialSymbol name="add" className="text-base text-on-primary" filled />

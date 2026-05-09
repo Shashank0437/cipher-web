@@ -54,8 +54,33 @@ class Settings(BaseSettings):
         default=300.0,
         validation_alias=AliasChoices("AGENT_TOOL_RUN_TIMEOUT_SECONDS"),
     )
+    # Agent bridge (Flask /api/cipherstrike/*) — optional shared secret with NyxStrike CIPHERSTRIKE_BRIDGE_SECRET.
+    cipherstrike_bridge_secret: str = ""
+    agent_llm_stream_timeout_seconds: float = Field(
+        default=600.0,
+        validation_alias=AliasChoices("AGENT_LLM_STREAM_TIMEOUT_SECONDS"),
+    )
 
-    @field_validator("brevo_api_key", "brevo_sender_email", "admin_api_key", "agent_api_token", mode="before")
+    # Router for /workspace/agent-chat — max tool names returned by route-intent → schemas-from-tools.
+    agent_router_max_tools: int = Field(default=12, ge=1, le=24)
+
+    # Rolling summary: when non-zero, summarize older turns once thread exceeds this message count (Mongo session doc).
+    agent_chat_summarize_after_messages: int = Field(default=0, ge=0, le=500)
+
+    # Persona for /workspace/agent-chat (Mongo-backed chat).
+    agent_chat_system_prompt: str = (
+        "You are CipherStrike, an expert penetration testing AI assistant. "
+        "Be concise, actionable, and safety-conscious; only suggest authorized testing."
+    )
+
+    @field_validator(
+        "brevo_api_key",
+        "brevo_sender_email",
+        "admin_api_key",
+        "agent_api_token",
+        "cipherstrike_bridge_secret",
+        mode="before",
+    )
     @classmethod
     def strip_secrets_env_padding(cls, v: object) -> object:
         return _strip_env_quotes(v)

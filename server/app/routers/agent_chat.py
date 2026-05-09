@@ -1,0 +1,530 @@
+"""Mongo-backed agent chat — proxies NyxStrike cipherstrike bridge."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+from bson import ObjectId
+from bson.errors import InvalidId
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from app.config import get_settings
+from app.constants import AGENT_CHAT_MESSAGES_COLLECTION, AGENT_CHAT_SESSIONS_COLLECTION
+from app.db import get_database
+from app.dependencies.auth import require_auth_user
+from app.schemas.agent_chat import (
+    AgentChatMessageOut,
+    AgentChatOrgToolRow,
+    AgentChatOrgToolsOut,
+    AgentChatSendBody,
+    AgentChatSessionCreate,
+    AgentChatSessionOut,
+    AgentChatSessionPatch,
+    AgentChatToolConfirmBody,
+    AgentChatToolDecisionsPatch,
+)
+from app.services.agent_chat import (
+    RouterTurnResult,
+    build_llm_messages_from_history,
+    context_snippet,
+    create_session,
+    delete_session,
+    get_message_owned,
+    get_session_owned,
+    insert_message,
+    list_agent_chat_org_tools_catalog,
+    list_messages,
+    list_sessions,
+    maybe_refresh_conversation_summary,
+    merge_tool_batch_decisions,
+    plan_router_turn,
+    rename_session,
+    stream_cipherstrike_turn,
+    stream_execute_tool_batch,
+    stream_follow_up_after_tool,
+)
+from app.services.agent_client import (
+    AgentUnreachableError,
+    agent_path_not_allowed,
+    forward_agent_post_tool,
+    normalize_agent_tool_path,
+)
+from app.services.organization_tools import get_disabled_tool_names
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/workspace/agent-chat", tags=["agent-chat"])
+
+_AGENT_CHAT_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _session_out(doc: dict) -> AgentChatSessionOut:
+    return AgentChatSessionOut(
+        id=str(doc["_id"]),
+        title=str(doc.get("title") or "Chat"),
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"],
+    )
+
+
+def _message_out(doc: dict) -> AgentChatMessageOut:
+    tc_list = doc.get("tool_calls")
+    tool_calls_out = tc_list if isinstance(tc_list, list) else None
+    return AgentChatMessageOut(
+        id=str(doc["_id"]),
+        role=str(doc.get("role") or "user"),
+        content=str(doc.get("content") or ""),
+        created_at=doc["created_at"],
+        tool_call=doc.get("tool_call") if isinstance(doc.get("tool_call"), dict) else None,
+        tool_calls=tool_calls_out,
+        batch_execution_state=str(doc["batch_execution_state"]) if doc.get("batch_execution_state") else None,
+        thinking_content=str(doc["thinking_content"]) if doc.get("thinking_content") else None,
+    )
+
+
+def _oid(s: str) -> ObjectId:
+    try:
+        return ObjectId(s)
+    except InvalidId as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid id") from e
+
+
+@router.get("/org-tools", response_model=AgentChatOrgToolsOut)
+async def agent_chat_org_tools(
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AgentChatOrgToolsOut:
+    settings = get_settings()
+    rows = await list_agent_chat_org_tools_catalog(
+        settings,
+        db,
+        organization_id=user["organization_id"],
+    )
+    if rows is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent catalog unreachable",
+        )
+    return AgentChatOrgToolsOut(tools=[AgentChatOrgToolRow(**r) for r in rows])
+
+
+@router.post("/sessions", response_model=AgentChatSessionOut)
+async def create_chat_session(
+    body: AgentChatSessionCreate,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AgentChatSessionOut:
+    title = body.title.strip() or "New chat"
+    doc = await create_session(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        title=title,
+    )
+    return _session_out(doc)
+
+
+@router.get("/sessions", response_model=list[AgentChatSessionOut])
+async def list_chat_sessions(
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[AgentChatSessionOut]:
+    rows = await list_sessions(db, organization_id=user["organization_id"], user_id=user["_id"])
+    return [_session_out(d) for d in rows]
+
+
+@router.patch("/sessions/{session_id}", response_model=AgentChatSessionOut)
+async def patch_chat_session(
+    session_id: str,
+    body: AgentChatSessionPatch,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AgentChatSessionOut:
+    sid = _oid(session_id)
+    ok = await rename_session(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        title=body.title,
+    )
+    if not ok:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    doc = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return _session_out(doc)
+
+
+@router.delete("/sessions/{session_id}")
+async def remove_chat_session(
+    session_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict[str, bool]:
+    sid = _oid(session_id)
+    ok = await delete_session(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+    )
+    if not ok:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return {"success": True}
+
+
+@router.get("/sessions/{session_id}/messages", response_model=list[AgentChatMessageOut])
+async def get_messages(
+    session_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[AgentChatMessageOut]:
+    sid = _oid(session_id)
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    rows = await list_messages(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+    )
+    return [_message_out(m) for m in rows]
+
+
+@router.post("/sessions/{session_id}/messages")
+async def post_message_stream(
+    session_id: str,
+    body: AgentChatSendBody,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    settings = get_settings()
+    sid = _oid(session_id)
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    await insert_message(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        role="user",
+        content=body.message.strip(),
+    )
+
+    if str(sess.get("title") or "").strip() in ("", "New chat"):
+        auto = body.message.strip()[:50] + ("…" if len(body.message.strip()) > 50 else "")
+        await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+            {"_id": sid},
+            {"$set": {"title": auto}},
+        )
+
+    explicit_seen: set[str] = set()
+    explicit_tools: list[str] = []
+    for item in body.explicit_tool_names:
+        n = str(item).strip()
+        if not n or n in explicit_seen:
+            continue
+        explicit_seen.add(n)
+        explicit_tools.append(n)
+
+    async def gen():
+        # Send bytes immediately so the browser/proxy leaves "pending (0 B)" before router + agent work.
+        yield ": stream-open\n\n"
+        try:
+            rows = await list_messages(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+            )
+            await maybe_refresh_conversation_summary(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                rows=rows,
+            )
+            sess_fresh = await get_session_owned(
+                db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid
+            )
+            summary_raw = (sess_fresh or {}).get("conversation_summary")
+            summary_str = str(summary_raw or "").strip() or None
+
+            ctx = body.context.model_dump() if body.context else None
+            llm_messages = build_llm_messages_from_history(
+                settings,
+                rows,
+                extra_system=context_snippet(ctx),
+                conversation_summary=summary_str,
+            )
+
+            try:
+                rt = await plan_router_turn(
+                    settings,
+                    db,
+                    organization_id=user["organization_id"],
+                    user_message=body.message.strip(),
+                    explicit_tool_names=explicit_tools if explicit_tools else None,
+                )
+            except Exception:
+                logger.exception("plan_router_turn")
+                rt = RouterTurnResult("operational", None, None, {})
+
+            if rt.intent == "conversational" and (rt.router_reply or "").strip():
+                text = rt.router_reply.strip()
+                step = 72
+                for i in range(0, len(text), step):
+                    chunk = text[i : i + step]
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    await asyncio.sleep(0)
+                await insert_message(
+                    db,
+                    organization_id=user["organization_id"],
+                    user_id=user["_id"],
+                    session_id=sid,
+                    role="assistant",
+                    content=text,
+                )
+                yield "data: [DONE]\n\n"
+                return
+
+            tool_schemas = rt.schemas if rt.intent == "operational" else None
+            tenant_roles = list(user.get("roles") or [])
+            auto_accept = body.tool_execution_mode == "auto_accept"
+            async for chunk in stream_cipherstrike_turn(
+                settings,
+                llm_messages,
+                tool_schemas if tool_schemas else None,
+                db=db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                tenant_roles=tenant_roles,
+                auto_accept_tools=auto_accept,
+            ):
+                yield chunk
+        except AgentUnreachableError as e:
+            yield f"data: [ERROR] {e.message}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
+
+
+@router.patch("/sessions/{session_id}/messages/{message_id}/tool-decisions")
+async def patch_tool_batch_decisions(
+    session_id: str,
+    message_id: str,
+    body: AgentChatToolDecisionsPatch,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict[str, bool | int]:
+    sid = _oid(session_id)
+    mid = _oid(message_id)
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    try:
+        quorum_met, decided, total = await merge_tool_batch_decisions(
+            db,
+            organization_id=user["organization_id"],
+            user_id=user["_id"],
+            session_id=sid,
+            message_id=mid,
+            decisions=body.decisions,
+        )
+    except ValueError as e:
+        detail = str(e)
+        if detail == "message_not_found":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found") from e
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=detail) from e
+    return {"quorum_met": quorum_met, "decided": decided, "total": total}
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/tool-batch-execute")
+async def post_tool_batch_execute_stream(
+    session_id: str,
+    message_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    settings = get_settings()
+    sid = _oid(session_id)
+    mid = _oid(message_id)
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    roles = user.get("roles") or []
+
+    async def gen():
+        try:
+            async for chunk in stream_execute_tool_batch(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                message_id=mid,
+                tenant_roles=list(roles) if isinstance(roles, list) else [],
+            ):
+                yield chunk
+        except AgentUnreachableError as e:
+            yield f"data: [ERROR] {e.message}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
+
+
+@router.post("/sessions/{session_id}/tool-confirm")
+async def tool_confirm_stream(
+    session_id: str,
+    body: AgentChatToolConfirmBody,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    settings = get_settings()
+    sid = _oid(session_id)
+    aid = _oid(body.assistant_message_id)
+
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    msg = await get_message_owned(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        message_id=aid,
+    )
+    if not msg or msg.get("role") != "assistant":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Assistant message not found")
+    batch_slots = msg.get("tool_calls")
+    if isinstance(batch_slots, list) and batch_slots:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="This message uses batch approval — use tool-decisions and tool-batch-execute",
+        )
+    tc = msg.get("tool_call")
+    if not isinstance(tc, dict) or tc.get("state") != "pending":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="No pending tool call on this message")
+
+    snapshot = msg.get("llm_messages_snapshot")
+    if not isinstance(snapshot, list):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Missing LLM snapshot on pending message")
+
+    tool_name = str(tc.get("tool_name") or "")
+    endpoint = normalize_agent_tool_path(str(tc.get("endpoint") or ""))
+    args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+
+    if body.approved:
+        roles = user.get("roles") or []
+        if "tenant_admin" not in roles:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Tenant administrator role required to execute tools",
+            )
+
+    async def gen():
+        try:
+            if not body.approved:
+                cancel = f"The operator chose not to run {tool_name}."
+                await insert_message(
+                    db,
+                    organization_id=user["organization_id"],
+                    user_id=user["_id"],
+                    session_id=sid,
+                    role="tool",
+                    content=cancel,
+                )
+                await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
+                    {"_id": aid},
+                    {"$set": {"tool_call.state": "rejected"}},
+                )
+                follow_msgs = list(snapshot) + [{"role": "tool", "content": cancel}]
+                async for chunk in stream_follow_up_after_tool(
+                    settings,
+                    db,
+                    organization_id=user["organization_id"],
+                    user_id=user["_id"],
+                    session_id=sid,
+                    llm_messages=follow_msgs,
+                ):
+                    yield chunk
+                return
+
+            disabled = await get_disabled_tool_names(db, user["organization_id"])
+            if tool_name.strip() in disabled:
+                yield "data: [ERROR] This tool is disabled for your organization.\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            if agent_path_not_allowed(endpoint):
+                yield "data: [ERROR] Tool endpoint is not allowed.\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            status_code, content, _ctype = await forward_agent_post_tool(settings, endpoint, args)
+            try:
+                result_obj = json.loads(content.decode("utf-8"))
+            except Exception:
+                result_obj = {"raw": content.decode("utf-8", errors="replace")[:4000]}
+
+            result_text = json.dumps(result_obj, indent=2)
+            if len(result_text) > 4000:
+                result_text = result_text[:4000] + "\n… (truncated)"
+
+            exec_record = (
+                f"[Tool executed: **{tool_name}**]\n"
+                f"Arguments: `{json.dumps(args)}`\n"
+                f"Result:\n```json\n{result_text}\n```"
+            )
+            await insert_message(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                role="assistant",
+                content=exec_record,
+            )
+            await insert_message(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                role="tool",
+                content=result_text,
+            )
+            await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
+                {"_id": aid},
+                {"$set": {"tool_call.state": "confirmed"}},
+            )
+
+            follow_msgs = list(snapshot) + [{"role": "tool", "content": result_text}]
+            async for chunk in stream_follow_up_after_tool(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                llm_messages=follow_msgs,
+            ):
+                yield chunk
+        except AgentUnreachableError as e:
+            yield f"data: [ERROR] {e.message}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)

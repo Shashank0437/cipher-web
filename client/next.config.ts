@@ -4,21 +4,15 @@ import type { NextConfig } from "next";
 
 const appDir = path.dirname(fileURLToPath(import.meta.url));
 
-/** FastAPI (Python) origin — browser hits `/be/*` and Next proxies here. */
-const pyApiOrigin = process.env.PY_API_URL ?? "http://127.0.0.1:8000";
-
+/**
+ * Browser calls `/be/*` (see `src/lib/env.ts`).
+ * Streaming APIs must NOT use `rewrites()` — Next buffers SSE through external rewrites.
+ * Proxy implementation: `src/app/be/[[...path]]/route.ts`.
+ */
 const nextConfig: NextConfig = {
   output: "standalone",
   turbopack: {
     root: appDir,
-  },
-  async rewrites() {
-    return [
-      {
-        source: "/be/:path*",
-        destination: `${pyApiOrigin.replace(/\/$/, "")}/:path*`,
-      },
-    ];
   },
 };
 

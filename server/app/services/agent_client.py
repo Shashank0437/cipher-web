@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 
 from app.config import Settings
+
+# Raw read size for SSE relay. httpx's ``aiter_text()`` wraps ``aiter_bytes()`` which calls
+# ``aiter_raw()`` with no chunk_size, so each iteration may match a large TCP/TLS read and
+# defer yielding until that buffer fills — the UI sees one burst. Smaller raw reads stream sooner.
+_AGENT_SSE_RAW_CHUNK_BYTES = 1024
 
 # Catalog tools call Flask routes under these prefixes (`tool_registry.py` + plugins).
 _AGENT_TOOL_ROUTE_PREFIXES: tuple[str, ...] = (
@@ -36,6 +42,9 @@ def _headers(settings: Settings) -> dict[str, str]:
     tok = settings.agent_api_token.strip() if settings.agent_api_token else ""
     if tok:
         h["Authorization"] = f"Bearer {tok}"
+    bridge = settings.cipherstrike_bridge_secret.strip() if settings.cipherstrike_bridge_secret else ""
+    if bridge:
+        h["X-CipherStrike-Bridge-Secret"] = bridge
     return h
 
 
@@ -130,3 +139,68 @@ async def forward_agent_post_tool(
         r.headers.get("content-type", "application/json").split(";")[0].strip() or "application/json"
     )
     return r.status_code, r.content, ctype
+
+
+async def agent_post_json(
+    settings: Settings,
+    path: str,
+    body: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """POST JSON to agent path; parse JSON response body."""
+    base = _normalized_base(settings)
+    if not base:
+        raise AgentUnreachableError("Agent URL is empty (set AGENT_MICROSERVICE_URL or AGENT_BASE_URL)")
+    timeout = httpx.Timeout(timeout_seconds)
+    headers = {**_headers(settings), "Content-Type": "application/json"}
+    url = urljoin(base, path.lstrip("/"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+            r = await client.post(url, json=body)
+    except httpx.TimeoutException:
+        raise AgentUnreachableError(f"Timed out calling agent after {timeout_seconds}s") from None
+    except httpx.RequestError as e:
+        raise AgentUnreachableError(f"Cannot reach agent: {e}") from None
+
+    try:
+        data = r.json()
+    except ValueError:
+        data = {"success": False, "error": r.text or f"HTTP {r.status_code}", "raw_status": r.status_code}
+    if r.status_code >= 400 and isinstance(data, dict) and "error" not in data:
+        data = {"success": False, "error": data.get("detail") or str(data), "status_code": r.status_code}
+    return data if isinstance(data, dict) else {"success": False, "error": "invalid agent JSON"}
+
+
+async def agent_post_sse_stream(
+    settings: Settings,
+    path: str,
+    body: dict[str, Any],
+    *,
+    timeout_seconds: float,
+):
+    """Stream response body as UTF-8 text chunks from agent SSE endpoint."""
+    base = _normalized_base(settings)
+    if not base:
+        raise AgentUnreachableError("Agent URL is empty (set AGENT_MICROSERVICE_URL or AGENT_BASE_URL)")
+    timeout = httpx.Timeout(timeout_seconds)
+    headers = {**_headers(settings), "Content-Type": "application/json"}
+    url = urljoin(base, path.lstrip("/"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+            async with client.stream("POST", url, json=body) as resp:
+                if resp.status_code >= 400:
+                    text = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise AgentUnreachableError(f"Agent SSE error HTTP {resp.status_code}: {text[:500]}")
+                utf8_dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                async for raw in resp.aiter_raw(chunk_size=_AGENT_SSE_RAW_CHUNK_BYTES):
+                    piece = utf8_dec.decode(raw)
+                    if piece:
+                        yield piece
+                tail = utf8_dec.decode(b"", final=True)
+                if tail:
+                    yield tail
+    except httpx.TimeoutException:
+        raise AgentUnreachableError(f"Timed out streaming from agent after {timeout_seconds}s") from None
+    except httpx.RequestError as e:
+        raise AgentUnreachableError(f"Cannot reach agent: {e}") from None
