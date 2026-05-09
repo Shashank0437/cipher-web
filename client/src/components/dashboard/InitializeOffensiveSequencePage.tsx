@@ -1802,8 +1802,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       Tools for this chat
                     </h2>
                     <p className="mt-1 text-[12px] leading-snug text-on-surface-variant">
-                      Only org-enabled tools are listed. Uncheck tools to narrow what the assistant may call — this
-                      overrides automatic tool routing from your prompt. Leave all checked for default behavior.
+                      Only org-enabled tools that the agent host reports as installed are listed. Uncheck tools to narrow
+                      what the assistant may call — this overrides automatic tool routing from your prompt. Leave all
+                      checked for default behavior.
                     </p>
                   </div>
                   <button

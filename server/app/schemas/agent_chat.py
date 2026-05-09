@@ -29,7 +29,7 @@ class AgentChatSessionOut(BaseModel):
 
 
 class AgentChatOrgToolRow(BaseModel):
-    """Tool enabled for agent chat for this org (not org-disabled, not chat-blocklisted)."""
+    """Tool enabled for agent chat for this org, reported installed on the agent host (not org-disabled, not chat-blocklisted)."""
 
     name: str
     description: str = ""

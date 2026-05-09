@@ -28,6 +28,7 @@ from app.services.agent_client import (
     forward_agent_post_tool,
     normalize_agent_tool_path,
     post_refresh_tool_availability,
+    tool_installed_from_agent_health,
 )
 from app.services.organization_tools import (
     count_execution_logs,
@@ -47,17 +48,6 @@ SERVER_LAYER_CATEGORIES = frozenset({"intelligence", "ai_assist", "vulnerability
 
 def _coerce_param_payload(obj: object) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
-
-
-def _lookup_availability(tools_status: dict[str, Any], tool_name: str) -> bool | None:
-    if tool_name in tools_status:
-        v = tools_status[tool_name]
-        return bool(v) if isinstance(v, bool) else bool(v)
-    key_l = tool_name.lower()
-    for k, v in tools_status.items():
-        if str(k).lower() == key_l:
-            return bool(v) if isinstance(v, bool) else bool(v)
-    return None
 
 
 def _server_layer_totals_from_cards(cards: list[WorkspaceToolCard]) -> ServerToolsSummary:
@@ -85,10 +75,6 @@ def _bars_from_effectiveness(active: bool, eff: float | None) -> int:
 
 
 def _build_cards(health: dict[str, Any], catalog: dict[str, Any]) -> list[WorkspaceToolCard]:
-    tools_status = health.get("tools_status") or {}
-    if not isinstance(tools_status, dict):
-        tools_status = {}
-
     raw_tools = catalog.get("tools")
     if not isinstance(raw_tools, list):
         raw_tools = []
@@ -120,11 +106,7 @@ def _build_cards(health: dict[str, Any], catalog: dict[str, Any]) -> list[Worksp
         params_raw = _coerce_param_payload(item.get("params"))
         optional_raw = _coerce_param_payload(item.get("optional"))
 
-        avail = _lookup_availability(tools_status, name)
-        if avail is not None:
-            active = avail
-        else:
-            active = category in SERVER_LAYER_CATEGORIES
+        active = tool_installed_from_agent_health(health, item)
 
         cards.append(
             WorkspaceToolCard(

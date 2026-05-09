@@ -26,6 +26,7 @@ from app.services.agent_client import (
     forward_agent_internal_tool_run_sync,
     forward_agent_post_tool,
     normalize_agent_tool_path,
+    tool_installed_from_agent_health,
 )
 from app.services.tool_run_stream import drain_tool_run_stream
 
@@ -778,9 +779,9 @@ async def _load_chat_tool_maps(
     *,
     organization_id: ObjectId,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]] | None:
-    """Agent catalog intersected with org-enabled chat tools. None if agent unreachable."""
+    """Agent catalog intersected with org-enabled chat tools that report installed on the agent host. None if agent unreachable."""
     try:
-        _health, catalog = await fetch_agent_health_and_catalog(settings)
+        health, catalog = await fetch_agent_health_and_catalog(settings)
     except AgentUnreachableError:
         return None
 
@@ -798,6 +799,8 @@ async def _load_chat_tool_maps(
             continue
         name = str(item.get("name") or "").strip()
         if not name or name in disabled or name in _CHAT_TOOL_BLOCKLIST:
+            continue
+        if not tool_installed_from_agent_health(health, item):
             continue
         by_name[name] = item
         desc = str(item.get("desc") or "").strip()

@@ -72,6 +72,34 @@ async def fetch_agent_health_and_catalog(settings: Settings) -> tuple[dict[str, 
     return health_r.json(), catalog_r.json()
 
 
+# Categories implemented on the CipherStrike server (no host binary) — same default as workspace tool cards
+# when /health has no probe entry for a catalog id.
+_AGENT_SERVER_LAYER_CATEGORIES = frozenset({"intelligence", "ai_assist", "vulnerability_intelligence"})
+
+
+def tool_installed_from_agent_health(health: dict[str, Any], tool_item: dict[str, Any]) -> bool:
+    """
+    Whether a catalog tool should be treated as runnable on the agent host.
+
+    Uses ``health["tools_status"][name]`` when present (mirrors workspace ``WorkspaceToolCard.active``).
+    When absent, Python-only / server-layer tools default to available.
+    """
+    name = str(tool_item.get("name") or "").strip()
+    if not name:
+        return False
+    category = str(tool_item.get("category") or "uncategorized")
+    raw = health.get("tools_status")
+    tools_status = raw if isinstance(raw, dict) else {}
+    if name in tools_status:
+        v = tools_status[name]
+        return bool(v) if isinstance(v, bool) else bool(v)
+    key_l = name.lower()
+    for k, v in tools_status.items():
+        if str(k).lower() == key_l:
+            return bool(v) if isinstance(v, bool) else bool(v)
+    return category in _AGENT_SERVER_LAYER_CATEGORIES
+
+
 async def post_refresh_tool_availability(settings: Settings) -> dict[str, Any]:
     """Forward to agent POST /api/tools/availability/refresh (forces tool probe pass)."""
     base = _normalized_base(settings)
