@@ -43,14 +43,20 @@ from app.services.agent_chat import (
     merge_tool_batch_decisions,
     plan_router_turn,
     rename_session,
+    routing_hints_from_plan_meta,
     stream_cipherstrike_turn,
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
+    _run_one_tool_detailed,
+    _slot_progress_payload,
+    _sse_flush_tick,
+    _sse_tool_batch_slot_progress,
+    _truncate_tool_log_tail,
+    _utc_now_iso,
 )
 from app.services.agent_client import (
     AgentUnreachableError,
     agent_path_not_allowed,
-    forward_agent_post_tool,
     normalize_agent_tool_path,
 )
 from app.services.organization_tools import get_disabled_tool_names
@@ -78,6 +84,14 @@ def _session_out(doc: dict) -> AgentChatSessionOut:
 def _message_out(doc: dict) -> AgentChatMessageOut:
     tc_list = doc.get("tool_calls")
     tool_calls_out = tc_list if isinstance(tc_list, list) else None
+    def _f(key: str):
+        v = doc.get(key)
+        if isinstance(v, float):
+            return v
+        if isinstance(v, int):
+            return float(v)
+        return None
+
     return AgentChatMessageOut(
         id=str(doc["_id"]),
         role=str(doc.get("role") or "user"),
@@ -87,6 +101,9 @@ def _message_out(doc: dict) -> AgentChatMessageOut:
         tool_calls=tool_calls_out,
         batch_execution_state=str(doc["batch_execution_state"]) if doc.get("batch_execution_state") else None,
         thinking_content=str(doc["thinking_content"]) if doc.get("thinking_content") else None,
+        router_category=str(doc["router_category"]).strip() if doc.get("router_category") else None,
+        keyword_category=str(doc["keyword_category"]).strip() if doc.get("keyword_category") else None,
+        keyword_confidence=_f("keyword_confidence"),
     )
 
 
@@ -297,6 +314,7 @@ async def post_message_stream(
                     session_id=sid,
                     role="assistant",
                     content=text,
+                    routing=routing_hints_from_plan_meta(rt.meta),
                 )
                 yield "data: [DONE]\n\n"
                 return
@@ -314,6 +332,7 @@ async def post_message_stream(
                 session_id=sid,
                 tenant_roles=tenant_roles,
                 auto_accept_tools=auto_accept,
+                routing=routing_hints_from_plan_meta(rt.meta),
             ):
                 yield chunk
         except AgentUnreachableError as e:
@@ -477,15 +496,82 @@ async def tool_confirm_stream(
                 yield "data: [DONE]\n\n"
                 return
 
-            status_code, content, _ctype = await forward_agent_post_tool(settings, endpoint, args)
-            try:
-                result_obj = json.loads(content.decode("utf-8"))
-            except Exception:
-                result_obj = {"raw": content.decode("utf-8", errors="replace")[:4000]}
+            # Same log tail / meta path as batch execute; stream [TOOL_BATCH_SLOT_PROGRESS] for UI (slot 0).
+            started_iso = _utc_now_iso()
+            await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
+                {"_id": aid},
+                {
+                    "$set": {
+                        "tool_call.run_status": "running",
+                        "tool_call.run_started_at": started_iso,
+                        "tool_call.run_finished_at": None,
+                        "tool_call.stdout_tail": None,
+                        "tool_call.stderr_tail": None,
+                        "tool_call.stdout_truncated": False,
+                        "tool_call.stderr_truncated": False,
+                        "tool_call.exit_code": None,
+                        "tool_call.http_status": None,
+                    },
+                },
+            )
+            yield _sse_tool_batch_slot_progress(
+                aid,
+                _slot_progress_payload(
+                    slot_index=0,
+                    tool_name=tool_name,
+                    run_status="running",
+                    stdout_tail=None,
+                    stderr_tail=None,
+                    stdout_truncated=False,
+                    stderr_truncated=False,
+                    exit_code=None,
+                    http_status=None,
+                    started_at=started_iso,
+                    finished_at=None,
+                ),
+            )
+            await _sse_flush_tick()
 
-            result_text = json.dumps(result_obj, indent=2)
+            try:
+                result_text, prog, _http_status = await _run_one_tool_detailed(settings, endpoint, args)
+            except Exception as exc:
+                logger.exception("tool_confirm_stream execute %s", tool_name)
+                fin_iso = _utc_now_iso()
+                se_tail, se_trunc = _truncate_tool_log_tail(str(exc))
+                prog = {
+                    "run_status": "error",
+                    "stdout_tail": None,
+                    "stderr_tail": se_tail,
+                    "stdout_truncated": False,
+                    "stderr_truncated": se_trunc,
+                    "exit_code": None,
+                    "http_status": None,
+                    "run_finished_at": fin_iso,
+                }
+                result_text = json.dumps({"error": str(exc)})
+
             if len(result_text) > 4000:
                 result_text = result_text[:4000] + "\n… (truncated)"
+
+            yield _sse_tool_batch_slot_progress(
+                aid,
+                _slot_progress_payload(
+                    slot_index=0,
+                    tool_name=tool_name,
+                    run_status=str(prog.get("run_status") or "done"),
+                    stdout_tail=prog.get("stdout_tail"),
+                    stderr_tail=prog.get("stderr_tail"),
+                    stdout_truncated=bool(prog.get("stdout_truncated")),
+                    stderr_truncated=bool(prog.get("stderr_truncated")),
+                    exit_code=prog.get("exit_code"),
+                    http_status=prog.get("http_status"),
+                    started_at=started_iso,
+                    finished_at=prog.get("run_finished_at")
+                    if isinstance(prog.get("run_finished_at"), str)
+                    else None,
+                ),
+            )
+            await _sse_flush_tick()
 
             exec_record = (
                 f"[Tool executed: **{tool_name}**]\n"
@@ -508,9 +594,23 @@ async def tool_confirm_stream(
                 role="tool",
                 content=result_text,
             )
+            finished_iso = prog.get("run_finished_at") if isinstance(prog.get("run_finished_at"), str) else None
             await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
                 {"_id": aid},
-                {"$set": {"tool_call.state": "confirmed"}},
+                {
+                    "$set": {
+                        "tool_call.state": "confirmed",
+                        "tool_call.run_status": str(prog.get("run_status") or "done"),
+                        "tool_call.stdout_tail": prog.get("stdout_tail"),
+                        "tool_call.stderr_tail": prog.get("stderr_tail"),
+                        "tool_call.stdout_truncated": bool(prog.get("stdout_truncated")),
+                        "tool_call.stderr_truncated": bool(prog.get("stderr_truncated")),
+                        "tool_call.exit_code": prog.get("exit_code"),
+                        "tool_call.http_status": prog.get("http_status"),
+                        "tool_call.run_started_at": started_iso,
+                        "tool_call.run_finished_at": finished_iso,
+                    },
+                },
             )
 
             follow_msgs = list(snapshot) + [{"role": "tool", "content": result_text}]

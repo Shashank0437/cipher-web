@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     )
     agent_api_token: str = ""  # When set, sent as Authorization: Bearer … (matches NYXSTRIKE_API_TOKEN)
     agent_timeout_seconds: float = 10.0
+    # route-intent calls an LLM on the agent; default generic timeout is often too low.
+    agent_route_intent_timeout_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=300.0,
+        validation_alias=AliasChoices("AGENT_ROUTE_INTENT_TIMEOUT_SECONDS"),
+    )
     # Long-lived HTTP timeouts for synchronous tool executions proxied by POST /workspace/tools/run
     agent_tool_run_timeout_seconds: float = Field(
         default=300.0,
@@ -61,8 +68,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_LLM_STREAM_TIMEOUT_SECONDS"),
     )
 
-    # Router for /workspace/agent-chat — max tool names returned by route-intent → schemas-from-tools.
-    agent_router_max_tools: int = Field(default=12, ge=1, le=24)
+    # Router for /workspace/agent-chat — max tool names route-intent may bind → schemas for main LLM (≤24).
+    agent_router_max_tools: int = Field(default=16, ge=1, le=24)
 
     # Rolling summary: when non-zero, summarize older turns once thread exceeds this message count (Mongo session doc).
     agent_chat_summarize_after_messages: int = Field(default=0, ge=0, le=500)
@@ -70,7 +77,13 @@ class Settings(BaseSettings):
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (
         "You are CipherStrike, an expert penetration testing AI assistant. "
-        "Be concise, actionable, and safety-conscious; only suggest authorized testing."
+        "Be concise, actionable, and safety-conscious and ready to test any website or application. "
+        "When the user names a target (URL, host, or scope) or asks to run a test, prefer invoking "
+        "the tools provided in this turn (function calls) to gather evidence — not long methodology-only lectures. "
+        "You may return **multiple parallel tool_calls in a single assistant message**. "
+        "For comprehensive pentests or when many scanners are listed, use **several or all** relevant tools at once "
+        "(often on the order of ~10) rather than one mega-tool, unless the user explicitly asks for smart-scan / orchestration only. "
+        "Reserve smart-scan-style meta-tools when the user wants a single orchestrated pass or when discrete scanners are not listed."
     )
 
     @field_validator(

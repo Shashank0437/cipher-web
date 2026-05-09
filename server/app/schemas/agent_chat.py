@@ -48,6 +48,9 @@ class AgentChatMessageOut(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     batch_execution_state: str | None = None
     thinking_content: str | None = None
+    router_category: str | None = None
+    keyword_category: str | None = None
+    keyword_confidence: float | None = None
 
 
 class AgentChatToolDecisionsPatch(BaseModel):

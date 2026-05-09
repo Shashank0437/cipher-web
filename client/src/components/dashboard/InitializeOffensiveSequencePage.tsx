@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowUp, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Loader2, Terminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { AgentChatMarkdown } from "@/components/dashboard/AgentChatMarkdown";
 import { DashboardHeaderProfile } from "@/components/dashboard/DashboardHeaderProfile";
@@ -16,6 +16,7 @@ import {
   listAgentChatMessages,
   listAgentChatSessions,
   patchAgentChatToolBatchDecisions,
+  type AgentChatBatchSlot,
   type AgentChatMessage,
   type AgentChatSession,
   type AgentChatSseEvent,
@@ -94,6 +95,139 @@ function batchHasApprovedSlot(m: AgentChatMessage): boolean {
   return slots.some((s) => String(s.human_decision ?? "").toLowerCase() === "approve");
 }
 
+function batchDecidedCount(m: AgentChatMessage): number {
+  const slots = m.tool_calls;
+  if (!Array.isArray(slots)) return 0;
+  return slots.filter((s) => {
+    const d = String(s.human_decision ?? "").toLowerCase();
+    return d === "approve" || d === "reject";
+  }).length;
+}
+
+function batchPanelOpen(m: AgentChatMessage): boolean {
+  const st = m.batch_execution_state ?? "";
+  return (
+    Array.isArray(m.tool_calls) &&
+    m.tool_calls.length > 0 &&
+    (st === "awaiting_quorum" || st === "executing" || st === "completed")
+  );
+}
+
+function mergeBatchSlotOverlay(
+  messageId: string,
+  slotIndex: number,
+  slot: AgentChatBatchSlot,
+  overlay: Record<string, Partial<AgentChatBatchSlot>>,
+): AgentChatBatchSlot {
+  const row = overlay[`${messageId}-${slotIndex}`];
+  return row ? { ...slot, ...row } : slot;
+}
+
+/** Single pending tool_call uses logical slot index 0 for SSE `[TOOL_BATCH_SLOT_PROGRESS]`. */
+function singleToolSlotFromMessage(m: AgentChatMessage): AgentChatBatchSlot {
+  const tc = m.tool_call;
+  return {
+    slot_index: 0,
+    tool_name: tc?.tool_name ?? "",
+    arguments: tc?.arguments,
+    endpoint: tc?.endpoint,
+    description: tc?.description,
+    run_status: tc?.run_status ?? undefined,
+    stdout_tail: tc?.stdout_tail ?? undefined,
+    stderr_tail: tc?.stderr_tail ?? undefined,
+    stdout_truncated: tc?.stdout_truncated,
+    stderr_truncated: tc?.stderr_truncated,
+    exit_code: tc?.exit_code ?? undefined,
+    http_status: tc?.http_status ?? undefined,
+    run_started_at: tc?.run_started_at ?? undefined,
+    run_finished_at: tc?.run_finished_at ?? undefined,
+  };
+}
+
+function BatchRunStatusChip({ batchState, slot }: { batchState: string; slot: AgentChatBatchSlot }) {
+  if (batchState === "awaiting_quorum") return null;
+  const rs = String(slot.run_status ?? "").toLowerCase();
+  if (!rs) {
+    return <span className="text-[10px] text-on-surface-variant">—</span>;
+  }
+  const cls =
+    rs === "running"
+      ? "bg-primary/20 text-primary animate-pulse"
+      : rs === "queued"
+        ? "bg-surface-container-high text-on-surface-variant"
+        : rs === "done"
+          ? "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200"
+          : rs === "error"
+            ? "bg-error/15 text-error"
+            : rs === "skipped"
+              ? "bg-outline-variant/40 text-on-surface-variant"
+              : "bg-surface-container-high text-on-surface";
+  return <span className={`rounded-md px-1.5 py-0 text-[10px] font-semibold capitalize ${cls}`}>{rs}</span>;
+}
+
+function BatchExecLogPanel({ slot }: { slot: AgentChatBatchSlot }) {
+  const out = (slot.stdout_tail ?? "").trim();
+  const err = (slot.stderr_tail ?? "").trim();
+  const meta: string[] = [];
+  if (slot.http_status != null && Number.isFinite(Number(slot.http_status))) {
+    meta.push(`HTTP ${slot.http_status}`);
+  }
+  if (slot.exit_code != null && slot.exit_code !== undefined) {
+    meta.push(`exit ${slot.exit_code}`);
+  }
+  const times: string[] = [];
+  if (slot.run_started_at) times.push(`started ${slot.run_started_at}`);
+  if (slot.run_finished_at) times.push(`finished ${slot.run_finished_at}`);
+
+  const hasBody = Boolean(out || err);
+  const hasMeta = meta.length > 0 || times.length > 0;
+  if (!hasBody && !hasMeta) return null;
+
+  return (
+    <details className="mt-1.5 overflow-hidden rounded-lg bg-surface-container-lowest/90 ring-1 ring-outline-variant/45">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-[10px] font-semibold text-primary [&::-webkit-details-marker]:hidden">
+        <Terminal className="size-3.5 shrink-0 opacity-90" aria-hidden strokeWidth={2} />
+        <span>Execution log</span>
+        {slot.stdout_truncated || slot.stderr_truncated ? (
+          <span className="text-[9px] font-normal text-on-surface-variant">(truncated)</span>
+        ) : null}
+      </summary>
+      <div className="space-y-2 border-t border-outline-variant/35 px-2 py-2">
+        {hasMeta ? (
+          <p className="font-mono text-[9px] leading-relaxed text-on-surface-variant">
+            {[...meta, ...times].join(" · ")}
+          </p>
+        ) : null}
+        {out ? (
+          <div>
+            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-on-surface-variant">stdout</p>
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/[0.04] p-2 font-mono text-[10px] leading-snug text-on-surface dark:bg-white/[0.06]">
+              {slot.stdout_tail ?? ""}
+            </pre>
+          </div>
+        ) : null}
+        {err ? (
+          <div>
+            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-error">stderr</p>
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-error/8 p-2 font-mono text-[10px] leading-snug text-on-surface">
+              {slot.stderr_tail ?? ""}
+            </pre>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function compactToolArgsPreview(args: unknown): string {
+  try {
+    const s = JSON.stringify(args ?? {});
+    return s.length > 88 ? `${s.slice(0, 85)}…` : s;
+  } catch {
+    return "";
+  }
+}
+
 /** Chevron-down used after “Thought”; rotates 180° when `<details>` is open. */
 function ThoughtDropdownChevron({ className }: { className?: string }) {
   return (
@@ -145,7 +279,7 @@ function CipherStrikeClaudePromptBox({
 }: ClaudePromptBoxProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cannotSubmit = !prompt.trim() || isSending;
-  const sendButtonDisabled = !prompt.trim() && !isSending;
+  const sendButtonDisabled = cannotSubmit;
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -249,17 +383,23 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const openFreshChatFlag = searchParams.get("new");
+  const chatIdParam = searchParams.get("chat_id");
 
   const [prompt, setPrompt] = useState("");
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
+  const [optimisticMessages, setOptimisticMessages] = useState<AgentChatMessage[]>([]);
   const [listErr, setListErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  /** PATCH …/tool-decisions in flight for this assistant message id */
+  const [batchDecisionsBusyId, setBatchDecisionsBusyId] = useState<string | null>(null);
+  /** Live merges from ``[TOOL_BATCH_SLOT_PROGRESS]`` SSE during batch execute (key: ``messageId-slotIndex``). */
+  const [liveBatchSlotOverlay, setLiveBatchSlotOverlay] = useState<Record<string, Partial<AgentChatBatchSlot>>>({});
   const [streamPreview, setStreamPreview] = useState("");
   const [streamReasoning, setStreamReasoning] = useState("");
   const [reasoningStreaming, setReasoningStreaming] = useState(false);
@@ -279,6 +419,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   /** Inner wrapper used with ResizeObserver so layout growth still triggers follow-scroll when pinned */
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const reasoningStartedAtRef = useRef<number | null>(null);
+  const streamPreviewQueueRef = useRef("");
+  const streamPreviewFlushTimerRef = useRef<number | null>(null);
   /** Skip auto-selecting the newest session once after `?new=1` so Run Scan opens an empty composer. */
   const skipAutosSelectRef = useRef(false);
 
@@ -334,6 +476,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       }
       const rows = await listAgentChatMessages(sessionId);
       setMessages(rows);
+      setOptimisticMessages((prev) =>
+        prev.filter((opt) => !rows.some((row) => row.role === opt.role && row.content === opt.content)),
+      );
     } catch (e) {
       setActionErr(formatChatError(e));
     } finally {
@@ -356,6 +501,49 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     setStreamThoughtSeconds(null);
   }, []);
 
+  const flushAllStreamPreview = useCallback(() => {
+    const pending = streamPreviewQueueRef.current;
+    if (!pending) return;
+    streamPreviewQueueRef.current = "";
+    setStreamPreview((prev) => prev + pending);
+  }, []);
+
+  const stopStreamPreviewFlush = useCallback(() => {
+    if (streamPreviewFlushTimerRef.current !== null) {
+      window.clearInterval(streamPreviewFlushTimerRef.current);
+      streamPreviewFlushTimerRef.current = null;
+    }
+  }, []);
+
+  const clearLiveStreamState = useCallback(() => {
+    stopStreamPreviewFlush();
+    streamPreviewQueueRef.current = "";
+    setReasoningStreaming(false);
+    setStreamReasoning("");
+    setStreamPreview("");
+    resetThoughtClock();
+  }, [resetThoughtClock, stopStreamPreviewFlush]);
+
+  const enqueueStreamPreview = useCallback(() => {
+    const pending = streamPreviewQueueRef.current;
+    if (pending) {
+      const takeNow = Math.min(6, pending.length);
+      streamPreviewQueueRef.current = pending.slice(takeNow);
+      setStreamPreview((prev) => prev + pending.slice(0, takeNow));
+    }
+    if (streamPreviewFlushTimerRef.current !== null) return;
+    streamPreviewFlushTimerRef.current = window.setInterval(() => {
+      const pending = streamPreviewQueueRef.current;
+      if (!pending) {
+        stopStreamPreviewFlush();
+        return;
+      }
+      const take = pending.length > 80 ? 16 : pending.length > 32 ? 10 : 6;
+      streamPreviewQueueRef.current = pending.slice(take);
+      setStreamPreview((prev) => prev + pending.slice(0, take));
+    }, 24);
+  }, [stopStreamPreviewFlush]);
+
   useEffect(() => {
     let cancelled = false;
     const wantsFresh =
@@ -372,11 +560,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         skipAutosSelectRef.current = true;
         setSelectedSessionId(null);
         setMessages([]);
+        setOptimisticMessages([]);
         setPrompt("");
-        setStreamPreview("");
-        setStreamReasoning("");
-        setReasoningStreaming(false);
-        resetThoughtClock();
+        setLiveBatchSlotOverlay({});
+        clearLiveStreamState();
         setExplicitToolNames(null);
         router.replace("/dashboard/scan", { scroll: false });
         return;
@@ -387,20 +574,33 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         return;
       }
 
-      setSelectedSessionId((prev) => prev ?? (rows[0]?.id ?? null));
+      const requestedChat = chatIdParam?.trim();
+      const requested = requestedChat && rows.some((r) => r.id === requestedChat) ? requestedChat : null;
+      setSelectedSessionId((prev) => prev ?? requested ?? (rows[0]?.id ?? null));
     })();
     return () => {
       cancelled = true;
     };
-  }, [refreshSessions, openFreshChatFlag, router, resetThoughtClock]);
+  }, [refreshSessions, openFreshChatFlag, chatIdParam, router, clearLiveStreamState]);
+
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    if (chatIdParam === selectedSessionId) return;
+    router.replace(`/dashboard/scan?chat_id=${encodeURIComponent(selectedSessionId)}`, { scroll: false });
+  }, [selectedSessionId, chatIdParam, router]);
 
   useEffect(() => {
     if (!selectedSessionId) {
       setMessages([]);
+      setOptimisticMessages([]);
       return;
     }
     void refreshMessages(selectedSessionId);
   }, [selectedSessionId, refreshMessages]);
+
+  useEffect(() => {
+    setLiveBatchSlotOverlay({});
+  }, [selectedSessionId]);
 
   useEffect(() => {
     setPinnedToBottom(true);
@@ -418,6 +618,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     streamPreview,
     streamReasoning,
     reasoningStreaming,
+    liveBatchSlotOverlay,
     scrollTranscriptToBottom,
   ]);
 
@@ -513,22 +714,31 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           abortRef.current?.abort();
         }
         await deleteAgentChatSession(sessionId);
-        const rows = await refreshSessions();
+        await refreshSessions();
         if (selectedSessionId === sessionId) {
-          setSelectedSessionId(rows[0]?.id ?? null);
+          setSelectedSessionId(null);
+          setMessages([]);
+          setOptimisticMessages([]);
+          clearLiveStreamState();
+          router.replace("/dashboard/scan?new=1", { scroll: false });
         }
       } catch (err) {
         setActionErr(formatChatError(err));
       }
     },
-    [selectedSessionId, refreshSessions],
+    [clearLiveStreamState, router, selectedSessionId, refreshSessions],
   );
 
   const handleNewChat = useCallback(() => {
     abortRef.current?.abort();
     setActionErr(null);
+    setSelectedSessionId(null);
+    setMessages([]);
+    setOptimisticMessages([]);
+    setLiveBatchSlotOverlay({});
+    clearLiveStreamState();
     router.replace("/dashboard/scan?new=1", { scroll: false });
-  }, [router]);
+  }, [clearLiveStreamState, router]);
 
   const attachStreamHandlers = useCallback(
     (sessionId: string) => (ev: AgentChatSseEvent) => {
@@ -546,66 +756,96 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       if (ev.type === "token") {
         captureThoughtDuration();
         setReasoningStreaming(false);
-        setStreamPreview((prev) => prev + ev.text);
+        streamPreviewQueueRef.current += ev.text;
+        enqueueStreamPreview();
         return;
       }
       if (ev.type === "tool_pending") {
         captureThoughtDuration();
+        flushAllStreamPreview();
+        clearLiveStreamState();
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
             await refreshSessions();
-          } finally {
-            setReasoningStreaming(false);
-            setStreamReasoning("");
-            setStreamPreview("");
+          } catch (e) {
+            setActionErr(formatChatError(e));
           }
         })();
         return;
       }
       if (ev.type === "tool_batch_pending") {
         captureThoughtDuration();
+        flushAllStreamPreview();
+        clearLiveStreamState();
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
             await refreshSessions();
-          } finally {
-            setReasoningStreaming(false);
-            setStreamReasoning("");
-            setStreamPreview("");
+          } catch (e) {
+            setActionErr(formatChatError(e));
           }
         })();
+        return;
+      }
+      if (ev.type === "tool_batch_slot_progress") {
+        const mid = typeof ev.payload.message_id === "string" ? ev.payload.message_id : "";
+        const si = ev.payload.slot_index;
+        if (!mid || typeof si !== "number") return;
+        const payload = ev.payload as Record<string, unknown>;
+        const { message_id: _m, ...rest } = payload;
+        const key = `${mid}-${si}`;
+        setLiveBatchSlotOverlay((prev) => ({
+          ...prev,
+          [key]: { ...prev[key], ...(rest as Partial<AgentChatBatchSlot>) },
+        }));
         return;
       }
       if (ev.type === "error") {
         captureThoughtDuration();
         setActionErr(ev.message);
+        clearLiveStreamState();
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
-          } finally {
-            setReasoningStreaming(false);
-            setStreamReasoning("");
-            setStreamPreview("");
+          } catch (e) {
+            setActionErr(formatChatError(e));
           }
         })();
         return;
       }
       if (ev.type === "done") {
         captureThoughtDuration();
+        flushAllStreamPreview();
+        stopStreamPreviewFlush();
+        streamPreviewQueueRef.current = "";
+        setReasoningStreaming(false);
+        setStreamReasoning("");
+        resetThoughtClock();
+        setLiveBatchSlotOverlay({});
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
             await refreshSessions();
+          } catch (e) {
+            setActionErr(formatChatError(e));
           } finally {
-            setReasoningStreaming(false);
-            setStreamReasoning("");
             setStreamPreview("");
           }
         })();
+        return;
       }
     },
-    [captureThoughtDuration, refreshMessages, refreshSessions],
+    [
+      captureThoughtDuration,
+      clearLiveStreamState,
+      enqueueStreamPreview,
+      flushAllStreamPreview,
+      refreshMessages,
+      refreshSessions,
+      resetThoughtClock,
+      stopStreamPreviewFlush,
+    ],
   );
 
   const handleExecute = useCallback(async () => {
@@ -629,10 +869,17 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       setPrompt("");
       setIsSending(true);
       setPinnedToBottom(true);
-      setStreamPreview("");
-      setStreamReasoning("");
-      setReasoningStreaming(false);
-      resetThoughtClock();
+      clearLiveStreamState();
+      setReasoningStreaming(true);
+      reasoningStartedAtRef.current = performance.now();
+      setOptimisticMessages([
+        {
+          id: `optimistic-user-${Date.now()}`,
+          role: "user",
+          content: text,
+          created_at: new Date().toISOString(),
+        },
+      ]);
 
       await streamAgentChatMessage(sessionId, text, {
         signal: ac.signal,
@@ -645,9 +892,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setReasoningStreaming(false);
         setStreamReasoning("");
         setStreamPreview("");
+        setOptimisticMessages([]);
         return;
       }
       setPrompt(text);
+      setOptimisticMessages([]);
       setActionErr(formatChatError(e));
       if (sessionId) await refreshMessages(sessionId);
     } finally {
@@ -658,10 +907,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     isSending,
     selectedSessionId,
     attachStreamHandlers,
+    clearLiveStreamState,
     refreshMessages,
     toolExecutionMode,
     explicitToolNames,
-    resetThoughtClock,
   ]);
 
   const handleToolConfirm = useCallback(
@@ -703,11 +952,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     async (messageId: string, decisions: Record<string, string>) => {
       if (!selectedSessionId) return;
       try {
+        setBatchDecisionsBusyId(messageId);
         setActionErr(null);
         await patchAgentChatToolBatchDecisions(selectedSessionId, messageId, decisions);
         await refreshMessages(selectedSessionId, { silent: true });
       } catch (e) {
         setActionErr(formatChatError(e));
+      } finally {
+        setBatchDecisionsBusyId(null);
       }
     },
     [selectedSessionId, refreshMessages],
@@ -748,10 +1000,17 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock],
   );
 
+  const visibleMessages = optimisticMessages.length > 0 ? [...messages, ...optimisticMessages] : messages;
+  const streamPreviewText = streamPreview.trim();
+  const persistedAssistantHasStreamPreview =
+    streamPreviewText.length > 0 &&
+    visibleMessages.some((m) => m.role === "assistant" && m.content.trim() === streamPreviewText);
+  const visibleStreamPreview = persistedAssistantHasStreamPreview ? "" : streamPreview;
+
   const hasThread =
     selectedSessionId !== null ||
-    messages.length > 0 ||
-    streamPreview.length > 0 ||
+    visibleMessages.length > 0 ||
+    visibleStreamPreview.length > 0 ||
     streamReasoning.length > 0 ||
     reasoningStreaming ||
     isSending ||
@@ -943,10 +1202,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                 </div>
               ) : (
                 <div className="mx-auto flex min-w-0 w-[min(100%,70%)] flex-col gap-4 pb-2">
-                  {messagesLoading && messages.length === 0 ? (
+                  {messagesLoading && visibleMessages.length === 0 ? (
                     <p className="text-[13px] text-on-surface-variant">Loading messages…</p>
                   ) : null}
-                  {messages.map((m) => (
+                  {visibleMessages.map((m) => (
                     <div
                       key={m.id}
                       className={`flex flex-col gap-2 ${
@@ -966,6 +1225,33 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           </div>
                         </details>
                       ) : null}
+                      {m.role === "assistant" &&
+                      (m.router_category?.trim() || m.keyword_category?.trim()) ? (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-outline-variant/45 bg-surface-container-lowest/70 px-2.5 py-1.5 text-[11px] text-on-surface-variant">
+                          <span className="font-semibold uppercase tracking-wide text-on-surface-variant/80">
+                            Routing
+                          </span>
+                          {m.router_category?.trim() ? (
+                            <span
+                              className="rounded-md bg-primary/14 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary"
+                              title="Workflow category from route-intent LLM"
+                            >
+                              router: {m.router_category.trim()}
+                            </span>
+                          ) : null}
+                          {m.keyword_category?.trim() ? (
+                            <span
+                              className="rounded-md bg-surface-container-high px-1.5 py-0.5 font-mono text-[11px] text-on-surface"
+                              title="classify-task keyword score + optional cheap LLM tie-break"
+                            >
+                              keyword: {m.keyword_category.trim()}
+                              {typeof m.keyword_confidence === "number"
+                                ? ` (${m.keyword_confidence.toFixed(2)})`
+                                : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div
                         className={
                           m.role === "user"
@@ -981,177 +1267,257 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           <p className="whitespace-pre-wrap break-words">{m.content}</p>
                         )}
                       </div>
-                      {m.role === "assistant" && batchAwaitingQuorum(m) ? (
-                        <div className="w-full max-w-lg rounded-xl border border-primary/25 bg-primary-container/30 px-4 py-3">
-                          <p className="text-[12px] font-bold text-primary">Tool batch — approve or reject each slot</p>
-                          <p className="mt-1 text-[11px] text-on-surface-variant">
-                            Every slot needs a decision before execution. Partial choices are saved but nothing runs until
-                            you choose for all tools and tap Execute batch.
-                          </p>
-                          <div className="mt-3 flex flex-wrap gap-2 border-t border-outline-variant/40 pt-3">
-                            <button
-                              type="button"
-                              disabled={confirmingId !== null}
-                              onClick={() => {
-                                const slots = m.tool_calls ?? [];
-                                const decisions = Object.fromEntries(
-                                  slots.map((s, i) => [String(s.slot_index ?? i), "approve"]),
-                                );
-                                void patchBatchDecisions(m.id, decisions);
-                              }}
-                              className="rounded-full border border-outline-variant bg-surface-container-high px-3 py-1.5 text-[12px] font-semibold text-on-surface disabled:opacity-45"
-                            >
-                              Approve all
-                            </button>
-                            <button
-                              type="button"
-                              disabled={confirmingId !== null}
-                              onClick={() => {
-                                const slots = m.tool_calls ?? [];
-                                const decisions = Object.fromEntries(
-                                  slots.map((s, i) => [String(s.slot_index ?? i), "reject"]),
-                                );
-                                void patchBatchDecisions(m.id, decisions);
-                              }}
-                              className="rounded-full border border-outline-variant bg-surface-container-high px-3 py-1.5 text-[12px] font-semibold text-on-surface disabled:opacity-45"
-                            >
-                              Reject all
-                            </button>
-                          </div>
-                          <ul className="mt-3 flex flex-col gap-3">
-                            {(m.tool_calls ?? []).map((slot, i) => {
-                              const idx = slot.slot_index ?? i;
-                              const decided = String(slot.human_decision ?? "").toLowerCase();
-                              const isAp = decided === "approve";
-                              const isRej = decided === "reject";
-                              return (
-                                <li
-                                  key={`${m.id}-${idx}`}
-                                  className="rounded-lg border border-outline-variant/70 bg-surface-container-lowest/90 p-3"
-                                >
-                                  <p className="font-mono text-[11px] font-bold text-on-surface">
-                                    {String(slot.tool_name ?? "")}
-                                  </p>
-                                  <pre className="mt-2 max-h-24 overflow-auto rounded-md bg-surface-container-lowest p-2 text-[10px] text-on-surface">
-                                    {JSON.stringify(slot.arguments ?? {}, null, 2)}
-                                  </pre>
-                                  <div className="mt-2 flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      disabled={confirmingId !== null}
-                                      onClick={() =>
-                                        void patchBatchDecisions(m.id, { [String(idx)]: "approve" })
-                                      }
-                                      className={`rounded-full px-3 py-1.5 text-[12px] font-bold disabled:opacity-45 ${
-                                        isAp
-                                          ? "bg-primary text-on-primary"
-                                          : "border border-outline-variant bg-surface-container-high text-on-surface"
-                                      }`}
-                                    >
-                                      Accept
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={confirmingId !== null}
-                                      onClick={() =>
-                                        void patchBatchDecisions(m.id, { [String(idx)]: "reject" })
-                                      }
-                                      className={`rounded-full px-3 py-1.5 text-[12px] font-semibold disabled:opacity-45 ${
-                                        isRej
-                                          ? "border-2 border-error bg-error/15 text-error"
-                                          : "border border-outline-variant bg-surface-container-high text-on-surface"
-                                      }`}
-                                    >
-                                      Reject
-                                    </button>
-                                    {isAp || isRej ? (
-                                      <span className="self-center text-[11px] text-on-surface-variant">
-                                        {isAp ? "Approved" : "Rejected"}
-                                      </span>
-                                    ) : (
-                                      <span className="self-center text-[11px] text-on-surface-variant">
-                                        Undecided
-                                      </span>
-                                    )}
+                      {m.role === "assistant" && batchPanelOpen(m)
+                        ? (() => {
+                            const batchSt = m.batch_execution_state ?? "";
+                            const showQuorum = batchSt === "awaiting_quorum";
+                            const slotsList = m.tool_calls ?? [];
+                            return (
+                              <div className="flex w-full max-w-full flex-col overflow-hidden rounded-xl border border-primary/25 bg-primary-container/25 sm:max-w-[min(100%,40rem)] lg:max-w-[min(100%,48rem)]">
+                                <div className="sticky top-0 z-[1] shrink-0 border-b border-outline-variant/45 bg-primary-container/55 px-3 py-2.5 backdrop-blur-sm sm:px-4">
+                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="min-w-0">
+                                      <p className="text-[12px] font-bold text-primary">Tool batch</p>
+                                      {batchSt === "awaiting_quorum" ? (
+                                        <p className="truncate text-[11px] text-on-surface-variant">
+                                          {batchDecidedCount(m)} / {slotsList.length} decided · approve or reject each
+                                          row, then Execute batch
+                                        </p>
+                                      ) : batchSt === "executing" ? (
+                                        <p className="truncate text-[11px] text-on-surface-variant">
+                                          Running approved tools in parallel…
+                                        </p>
+                                      ) : (
+                                        <p className="truncate text-[11px] text-on-surface-variant">
+                                          Batch finished · open execution logs per tool below
+                                        </p>
+                                      )}
+                                    </div>
+                                    {showQuorum ? (
+                                      <div className="flex shrink-0 flex-wrap gap-1.5">
+                                        <button
+                                          type="button"
+                                          disabled={confirmingId !== null || batchDecisionsBusyId === m.id}
+                                          onClick={() => {
+                                            const decisions = Object.fromEntries(
+                                              slotsList.map((_s, i) => [String(i), "approve"]),
+                                            );
+                                            void patchBatchDecisions(m.id, decisions);
+                                          }}
+                                          className="rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-[11px] font-semibold text-on-surface disabled:opacity-45"
+                                        >
+                                          {batchDecisionsBusyId === m.id ? "Saving…" : "Approve all"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={confirmingId !== null || batchDecisionsBusyId === m.id}
+                                          onClick={() => {
+                                            const decisions = Object.fromEntries(
+                                              slotsList.map((_s, i) => [String(i), "reject"]),
+                                            );
+                                            void patchBatchDecisions(m.id, decisions);
+                                          }}
+                                          className="rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-[11px] font-semibold text-on-surface disabled:opacity-45"
+                                        >
+                                          {batchDecisionsBusyId === m.id ? "Saving…" : "Reject all"}
+                                        </button>
+                                      </div>
+                                    ) : null}
                                   </div>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                          <div className="mt-4 border-t border-outline-variant/40 pt-3">
-                            <button
-                              type="button"
-                              disabled={
-                                confirmingId !== null ||
-                                !batchQuorumMet(m) ||
-                                (!isTenantAdmin && batchHasApprovedSlot(m))
-                              }
-                              title={
-                                !batchQuorumMet(m)
-                                  ? "Choose approve or reject for every tool first"
-                                  : !isTenantAdmin && batchHasApprovedSlot(m)
-                                    ? "Tenant administrator role required when any tool is approved"
-                                    : "Run approved tools"
-                              }
-                              onClick={() => void handleBatchExecute(m.id)}
-                              className="rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
-                            >
-                              {confirmingId === m.id ? "Running…" : "Execute batch"}
-                            </button>
-                            {!isTenantAdmin && batchHasApprovedSlot(m) && batchQuorumMet(m) ? (
-                              <p className="mt-2 text-[11px] text-on-surface-variant">
-                                Running approved tools requires the tenant administrator role. Reject-all avoids this.
-                              </p>
-                            ) : null}
-                          </div>
-                        </div>
-                      ) : null}
+                                </div>
+
+                                <ul className="max-h-[min(420px,52vh)] divide-y divide-outline-variant/35 overflow-y-auto overscroll-contain">
+                                  {slotsList.map((slot, i) => {
+                                    const decided = String(slot.human_decision ?? "").toLowerCase();
+                                    const isAp = decided === "approve";
+                                    const isRej = decided === "reject";
+                                    const preview = compactToolArgsPreview(slot.arguments);
+                                    const slotIdx = typeof slot.slot_index === "number" ? slot.slot_index : i;
+                                    const merged = mergeBatchSlotOverlay(m.id, slotIdx, slot, liveBatchSlotOverlay);
+                                    return (
+                                      <li
+                                        key={`${m.id}-slot-${i}`}
+                                        className="flex flex-col gap-1.5 px-3 py-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3 sm:py-1.5 sm:pl-4 sm:pr-3"
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                            <span className="font-mono text-[11px] font-bold text-on-surface">
+                                              {String(slot.tool_name ?? "")}
+                                            </span>
+                                            {!showQuorum ? <BatchRunStatusChip batchState={batchSt} slot={merged} /> : null}
+                                            {showQuorum ? (
+                                              isAp ? (
+                                                <span className="rounded-md bg-primary/18 px-1.5 py-0 text-[10px] font-semibold text-primary">
+                                                  Approved
+                                                </span>
+                                              ) : isRej ? (
+                                                <span className="rounded-md bg-error/12 px-1.5 py-0 text-[10px] font-semibold text-error">
+                                                  Rejected
+                                                </span>
+                                              ) : (
+                                                <span className="text-[10px] text-on-surface-variant">Pending</span>
+                                              )
+                                            ) : null}
+                                          </div>
+                                          {preview ? (
+                                            <p
+                                              className="truncate font-mono text-[10px] text-on-surface-variant/90"
+                                              title={preview}
+                                            >
+                                              {preview}
+                                            </p>
+                                          ) : null}
+                                          <details className="mt-0.5">
+                                            <summary className="cursor-pointer select-none text-[10px] font-medium text-primary hover:underline">
+                                              Full arguments
+                                            </summary>
+                                            <pre className="mt-1 max-h-28 overflow-auto rounded-md bg-surface-container-lowest/95 p-2 font-mono text-[10px] leading-snug text-on-surface ring-1 ring-outline-variant/40">
+                                              {JSON.stringify(slot.arguments ?? {}, null, 2)}
+                                            </pre>
+                                          </details>
+                                          {!showQuorum ? <BatchExecLogPanel slot={merged} /> : null}
+                                        </div>
+                                        {showQuorum ? (
+                                          <div className="flex shrink-0 gap-1 sm:pt-0.5">
+                                            <button
+                                              type="button"
+                                              disabled={confirmingId !== null || batchDecisionsBusyId === m.id}
+                                              onClick={() => void patchBatchDecisions(m.id, { [String(i)]: "approve" })}
+                                              className={`rounded-lg px-2 py-1 text-[11px] font-bold disabled:opacity-45 ${
+                                                isAp
+                                                  ? "bg-primary text-on-primary"
+                                                  : "border border-outline-variant/80 bg-surface-container-high text-on-surface"
+                                              }`}
+                                            >
+                                              Approve
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={confirmingId !== null || batchDecisionsBusyId === m.id}
+                                              onClick={() => void patchBatchDecisions(m.id, { [String(i)]: "reject" })}
+                                              className={`rounded-lg px-2 py-1 text-[11px] font-semibold disabled:opacity-45 ${
+                                                isRej
+                                                  ? "border border-error bg-error/12 text-error"
+                                                  : "border border-outline-variant/80 bg-surface-container-high text-on-surface"
+                                              }`}
+                                            >
+                                              Reject
+                                            </button>
+                                          </div>
+                                        ) : null}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+
+                                {showQuorum ? (
+                                  <div className="shrink-0 border-t border-outline-variant/45 bg-primary-container/30 px-3 py-2.5 sm:px-4">
+                                    <button
+                                      type="button"
+                                      disabled={
+                                        confirmingId !== null ||
+                                        batchDecisionsBusyId === m.id ||
+                                        !batchQuorumMet(m) ||
+                                        (!isTenantAdmin && batchHasApprovedSlot(m))
+                                      }
+                                      title={
+                                        !batchQuorumMet(m)
+                                          ? "Choose approve or reject for every tool first"
+                                          : !isTenantAdmin && batchHasApprovedSlot(m)
+                                            ? "Tenant administrator role required when any tool is approved"
+                                            : "Run approved tools"
+                                      }
+                                      onClick={() => void handleBatchExecute(m.id)}
+                                      className="rounded-lg bg-primary px-4 py-2 text-[12px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
+                                    >
+                                      {confirmingId === m.id ? "Running…" : "Execute batch"}
+                                    </button>
+                                    {!isTenantAdmin && batchHasApprovedSlot(m) && batchQuorumMet(m) ? (
+                                      <p className="mt-2 text-[11px] text-on-surface-variant">
+                                        Running approved tools requires the tenant administrator role. Reject-all
+                                        avoids this.
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })()
+                        : null}
                       {m.role === "assistant" &&
                       m.tool_call &&
                       String(m.tool_call.state) === "pending" &&
-                      !batchAwaitingQuorum(m) ? (
-                        <div className="w-full max-w-md rounded-xl border border-primary/25 bg-primary-container/30 px-4 py-3">
-                          <p className="text-[12px] font-bold text-primary">Tool approval required</p>
-                          <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
-                            {String(m.tool_call.tool_name ?? "")}
-                          </p>
-                          <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-surface-container-lowest p-2 text-[11px] text-on-surface">
-                            {JSON.stringify(m.tool_call.arguments ?? {}, null, 2)}
-                          </pre>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              disabled={!isTenantAdmin || confirmingId !== null}
-                              title={
-                                isTenantAdmin
-                                  ? "Run this tool via the NyxStrike agent"
-                                  : "Tenant administrator role required"
-                              }
-                              onClick={() => void handleToolConfirm(m.id, true)}
-                              className="rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              type="button"
-                              disabled={confirmingId !== null}
-                              onClick={() => void handleToolConfirm(m.id, false)}
-                              className="rounded-full border border-outline-variant bg-surface-container-high px-4 py-2 text-[13px] font-semibold text-on-surface disabled:opacity-45"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                          {!isTenantAdmin ? (
-                            <p className="mt-2 text-[11px] text-on-surface-variant">
-                              Approvals require the tenant administrator role. You can still reject.
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : null}
+                      !batchPanelOpen(m)
+                        ? (() => {
+                            const mergedSingle = mergeBatchSlotOverlay(
+                              m.id,
+                              0,
+                              singleToolSlotFromMessage(m),
+                              liveBatchSlotOverlay,
+                            );
+                            const showRunChip =
+                              confirmingId === m.id ||
+                              Boolean(String(mergedSingle.run_status ?? "").trim());
+                            return (
+                              <div className="w-full max-w-md rounded-xl border border-primary/25 bg-primary-container/30 px-4 py-3">
+                                <p className="text-[12px] font-bold text-primary">Tool approval required</p>
+                                <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
+                                  {String(m.tool_call.tool_name ?? "")}
+                                </p>
+                                <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-surface-container-lowest p-2 text-[11px] text-on-surface">
+                                  {JSON.stringify(m.tool_call.arguments ?? {}, null, 2)}
+                                </pre>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={!isTenantAdmin || confirmingId !== null}
+                                    title={
+                                      isTenantAdmin
+                                        ? "Run this tool via the NyxStrike agent"
+                                        : "Tenant administrator role required"
+                                    }
+                                    onClick={() => void handleToolConfirm(m.id, true)}
+                                    className="rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-45"
+                                  >
+                                    {confirmingId === m.id ? "Running…" : "Approve"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={confirmingId !== null}
+                                    onClick={() => void handleToolConfirm(m.id, false)}
+                                    className="rounded-full border border-outline-variant bg-surface-container-high px-4 py-2 text-[13px] font-semibold text-on-surface disabled:opacity-45"
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                                {showRunChip ? (
+                                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                                      Run
+                                    </span>
+                                    <BatchRunStatusChip
+                                      batchState={confirmingId === m.id ? "executing" : "completed"}
+                                      slot={mergedSingle}
+                                    />
+                                  </div>
+                                ) : null}
+                                <BatchExecLogPanel slot={mergedSingle} />
+                                {!isTenantAdmin ? (
+                                  <p className="mt-2 text-[11px] text-on-surface-variant">
+                                    Approvals require the tenant administrator role. You can still reject.
+                                  </p>
+                                ) : null}
+                              </div>
+                            );
+                          })()
+                        : null}
                     </div>
                   ))}
                   {(reasoningStreaming || streamReasoning.length > 0) && (
-                    <details className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]">
+                    <details
+                      className="group mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)]"
+                      open={reasoningStreaming}
+                    >
                       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
                         <span>
                           {reasoningStreaming
@@ -1170,9 +1536,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       </div>
                     </details>
                   )}
-                  {streamPreview ? (
+                  {visibleStreamPreview ? (
                     <div className="mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)] py-1 text-[15px] leading-[1.75] text-on-surface">
-                      <AgentChatMarkdown text={streamPreview} />
+                      <AgentChatMarkdown text={visibleStreamPreview} />
                       <span className="mt-0.5 inline-block h-3 w-1 animate-pulse rounded-full bg-primary align-middle" />
                     </div>
                   ) : null}
@@ -1181,7 +1547,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               )}
               </div>
             </div>
-            {hasThread && !pinnedToBottom ? (
+            {hasThread && !pinnedToBottom && !isSending && confirmingId === null ? (
               <button
                 type="button"
                 onClick={handleScrollToBottomClick}
@@ -1189,7 +1555,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                 aria-label="Scroll to bottom of conversation"
                 className="pointer-events-auto absolute bottom-4 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-outline-variant bg-surface-container-lowest text-primary shadow-md ring-1 ring-primary/10 transition hover:border-primary/40 hover:bg-primary-container/85 sm:bottom-5"
               >
-                <MaterialSymbol name="south" className="block text-[22px] leading-none" filled />
+                <ArrowDown className="size-[1.15rem] stroke-[2.5]" aria-hidden />
               </button>
             ) : null}
             </div>

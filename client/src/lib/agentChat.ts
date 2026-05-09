@@ -16,6 +16,16 @@ export type AgentChatToolCallState = {
   arguments?: Record<string, unknown>;
   endpoint?: string;
   description?: string;
+  /** Filled while / after tool_confirm_stream executes (same meaning as batch slots). */
+  run_status?: string | null;
+  stdout_tail?: string | null;
+  stderr_tail?: string | null;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+  exit_code?: number | null;
+  http_status?: number | null;
+  run_started_at?: string | null;
+  run_finished_at?: string | null;
 };
 
 export type AgentChatBatchSlot = {
@@ -26,6 +36,16 @@ export type AgentChatBatchSlot = {
   endpoint?: string;
   description?: string;
   execution_outcome?: string;
+  /** Populated during/after parallel batch execution */
+  run_status?: string | null;
+  stdout_tail?: string | null;
+  stderr_tail?: string | null;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+  exit_code?: number | null;
+  http_status?: number | null;
+  run_started_at?: string | null;
+  run_finished_at?: string | null;
 };
 
 export type AgentChatMessage = {
@@ -37,6 +57,11 @@ export type AgentChatMessage = {
   tool_calls?: AgentChatBatchSlot[] | null;
   batch_execution_state?: string | null;
   thinking_content?: string | null;
+  /** Primary workflow slug from route-intent LLM (informational). */
+  router_category?: string | null;
+  /** classify-task keyword heuristic (+ cheap LLM tie-break on agent). */
+  keyword_category?: string | null;
+  keyword_confidence?: number | null;
 };
 
 export type AgentChatToolExecutionMode = "ask_permission" | "auto_accept";
@@ -51,6 +76,21 @@ export type AgentChatContextPayload = {
   session_id?: string;
 };
 
+export type AgentChatToolBatchSlotProgressPayload = {
+  message_id?: string;
+  slot_index?: number;
+  tool_name?: string;
+  run_status?: string;
+  stdout_tail?: string | null;
+  stderr_tail?: string | null;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+  exit_code?: number | null;
+  http_status?: number | null;
+  run_started_at?: string | null;
+  run_finished_at?: string | null;
+};
+
 /** Parsed SSE payloads from POST …/messages and …/tool-confirm (CipherStrike agent chat). */
 export type AgentChatSseEvent =
   | { type: "thinking" }
@@ -58,8 +98,11 @@ export type AgentChatSseEvent =
   | { type: "token"; text: string }
   | { type: "tool_pending"; payload: Record<string, unknown> }
   | { type: "tool_batch_pending"; payload: Record<string, unknown> }
+  | { type: "tool_batch_slot_progress"; payload: AgentChatToolBatchSlotProgressPayload }
   | { type: "done" }
   | { type: "error"; message: string };
+
+type AgentChatSseEventHandler = (ev: AgentChatSseEvent) => void | Promise<void>;
 
 function bearerHeaders(json = false): Headers {
   const headers = new Headers();
@@ -170,6 +213,15 @@ export function parseAgentChatSsePayload(payload: string): AgentChatSseEvent | n
       return { type: "tool_batch_pending", payload: {} };
     }
   }
+  if (p.startsWith("[TOOL_BATCH_SLOT_PROGRESS]")) {
+    const rest = p.slice("[TOOL_BATCH_SLOT_PROGRESS]".length).trim();
+    try {
+      const obj = JSON.parse(rest) as AgentChatToolBatchSlotProgressPayload;
+      return { type: "tool_batch_slot_progress", payload: obj };
+    } catch {
+      return { type: "tool_batch_slot_progress", payload: {} };
+    }
+  }
   try {
     const tok = JSON.parse(p);
     if (typeof tok === "string") return { type: "token", text: tok };
@@ -186,16 +238,16 @@ function yieldUiTurn(): Promise<void> {
   });
 }
 
-async function dispatchSseEvent(ev: AgentChatSseEvent, onEvent: (ev: AgentChatSseEvent) => void): Promise<void> {
-  onEvent(ev);
-  if (ev.type === "token" || ev.type === "thinking_token") {
+async function dispatchSseEvent(ev: AgentChatSseEvent, onEvent: AgentChatSseEventHandler): Promise<void> {
+  await onEvent(ev);
+  if (ev.type === "token" || ev.type === "thinking_token" || ev.type === "tool_batch_slot_progress") {
     await yieldUiTurn();
   }
 }
 
 async function consumeSse(
   res: Response,
-  onEvent: (ev: AgentChatSseEvent) => void,
+  onEvent: AgentChatSseEventHandler,
   signal?: AbortSignal,
 ): Promise<void> {
   const reader = res.body?.getReader();
@@ -218,7 +270,13 @@ async function consumeSse(
       const data = sseBlockToData(rawBlock);
       if (data) {
         const ev = parseAgentChatSsePayload(data);
-        if (ev) await dispatchSseEvent(ev, onEvent);
+        if (ev) {
+          await dispatchSseEvent(ev, onEvent);
+          if (ev.type === "done") {
+            await reader.cancel().catch(() => {});
+            return;
+          }
+        }
       }
       sep = buffer.indexOf("\n\n");
     }
@@ -236,7 +294,7 @@ async function consumeSse(
 async function postSse(
   path: string,
   jsonBody: unknown,
-  onEvent: (ev: AgentChatSseEvent) => void,
+  onEvent: AgentChatSseEventHandler,
   signal?: AbortSignal,
 ): Promise<void> {
   /** Do not bump global API pending — long SSE streams would show the full-screen "Loading workspace…" overlay. */
@@ -255,7 +313,7 @@ async function postSse(
 
 async function postSseEmptyBody(
   path: string,
-  onEvent: (ev: AgentChatSseEvent) => void,
+  onEvent: AgentChatSseEventHandler,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${getApiBase()}${path}`, {
@@ -278,7 +336,7 @@ export async function streamAgentChatMessage(
     context?: AgentChatContextPayload;
     toolExecutionMode?: AgentChatToolExecutionMode;
     explicitToolNames?: string[] | null;
-    onEvent?: (ev: AgentChatSseEvent) => void;
+    onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
 ): Promise<void> {
@@ -313,7 +371,7 @@ export async function streamAgentChatToolConfirm(
   assistantMessageId: string,
   approved: boolean,
   options?: {
-    onEvent?: (ev: AgentChatSseEvent) => void;
+    onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
 ): Promise<void> {
@@ -346,7 +404,7 @@ export async function streamAgentChatToolBatchExecute(
   sessionId: string,
   assistantMessageId: string,
   options?: {
-    onEvent?: (ev: AgentChatSseEvent) => void;
+    onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
 ): Promise<void> {

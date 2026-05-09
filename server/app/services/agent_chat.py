@@ -27,6 +27,125 @@ from app.services.agent_client import (
 logger = logging.getLogger(__name__)
 
 _MAX_AGENT_CHAT_THINKING_CHARS = 100_000
+_TOOL_LOG_TAIL_MAX_BYTES = 32 * 1024
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate_tool_log_tail(text: str | None, max_bytes: int = _TOOL_LOG_TAIL_MAX_BYTES) -> tuple[str | None, bool]:
+    """Return UTF-8–safe tail of ``text`` capped at ``max_bytes``. Second value is True if truncated."""
+    if text is None:
+        return None, False
+    s = text if isinstance(text, str) else str(text)
+    if not s:
+        return "", False
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s, False
+    cut = len(encoded) - max_bytes
+    tail = encoded[-max_bytes:].decode("utf-8", errors="replace")
+    return f"... ({cut} bytes truncated)\n{tail}", True
+
+
+def _coerce_exit_code(result_obj: dict[str, Any]) -> int | None:
+    rc = result_obj.get("return_code")
+    if rc is None:
+        rc = result_obj.get("exit_code")
+    if rc is None:
+        return None
+    try:
+        return int(rc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_terminal_run_status(http_status: int, result_obj: Any) -> str:
+    if http_status >= 400:
+        return "error"
+    if isinstance(result_obj, dict) and result_obj.get("success") is False:
+        return "error"
+    return "done"
+
+
+def _merge_slot_patch(slots: list[dict[str, Any]], slot_index: int, patch: dict[str, Any]) -> None:
+    for i, s in enumerate(slots):
+        idx = int(s.get("slot_index", i))
+        if idx == int(slot_index):
+            slots[i] = {**s, **patch}
+            return
+
+
+def _slot_progress_payload(
+    *,
+    slot_index: int,
+    tool_name: str,
+    run_status: str,
+    stdout_tail: str | None,
+    stderr_tail: str | None,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    exit_code: int | None,
+    http_status: int | None,
+    started_at: str | None,
+    finished_at: str | None,
+) -> dict[str, Any]:
+    return {
+        "slot_index": slot_index,
+        "tool_name": tool_name,
+        "run_status": run_status,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "exit_code": exit_code,
+        "http_status": http_status,
+        "run_started_at": started_at,
+        "run_finished_at": finished_at,
+    }
+
+
+def _progress_from_completed_run(
+    http_status: int,
+    result_obj: Any,
+    *,
+    run_status_override: str | None = None,
+) -> dict[str, Any]:
+    stdout_raw = ""
+    stderr_raw = ""
+    exit_code: int | None = None
+    if isinstance(result_obj, dict):
+        exit_code = _coerce_exit_code(result_obj)
+        if result_obj.get("stdout") is not None:
+            stdout_raw = str(result_obj.get("stdout") or "")
+        if result_obj.get("stderr") is not None:
+            stderr_raw = str(result_obj.get("stderr") or "")
+    elif result_obj is not None:
+        stdout_raw = str(result_obj)
+
+    out_tail, out_trunc = _truncate_tool_log_tail(stdout_raw if stdout_raw else None)
+    err_tail, err_trunc = _truncate_tool_log_tail(stderr_raw if stderr_raw else None)
+    rs = run_status_override or _infer_terminal_run_status(http_status, result_obj)
+
+    now = _utc_now_iso()
+    return {
+        "run_status": rs,
+        "stdout_tail": out_tail,
+        "stderr_tail": err_tail,
+        "stdout_truncated": out_trunc,
+        "stderr_truncated": err_trunc,
+        "exit_code": exit_code,
+        "http_status": http_status if http_status else None,
+        "run_finished_at": now,
+    }
+
+
+def _sse_tool_batch_slot_progress(batch_message_id: ObjectId | None, body: dict[str, Any]) -> str:
+    payload = dict(body)
+    if batch_message_id is not None:
+        payload["message_id"] = str(batch_message_id)
+    return f"data: [TOOL_BATCH_SLOT_PROGRESS]{json.dumps(payload, default=str)}\n\n"
 
 
 async def _sse_flush_tick() -> None:
@@ -66,6 +185,89 @@ _CHAT_TOOL_BLOCKLIST = frozenset(
     },
 )
 
+# Workflow slugs aligned with NyxStrike tool_registry.CATEGORIES (for validating router output).
+_CHAT_ROUTING_CATEGORY_SLUGS = frozenset(
+    {
+        "essential",
+        "network_recon",
+        "web_recon",
+        "web_vuln",
+        "brute_force",
+        "binary",
+        "forensics",
+        "cloud",
+        "osint",
+        "exploitation",
+        "api",
+        "wifi_pentest",
+        "database",
+        "active_directory",
+        "vulnerability_intelligence",
+    },
+)
+
+
+def _normalize_router_category_slug(raw: Any) -> str | None:
+    s = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return s if s in _CHAT_ROUTING_CATEGORY_SLUGS else None
+
+
+def _routing_insert_fragment(hints: dict[str, Any] | None) -> dict[str, Any]:
+    if not hints:
+        return {}
+    frag: dict[str, Any] = {}
+    rc = hints.get("router_category")
+    if isinstance(rc, str) and rc.strip():
+        frag["router_category"] = rc.strip()
+    kc = hints.get("keyword_category")
+    if isinstance(kc, str) and kc.strip():
+        frag["keyword_category"] = kc.strip()
+    kf = hints.get("keyword_confidence")
+    if isinstance(kf, (int, float)):
+        frag["keyword_confidence"] = float(kf)
+    return frag
+
+
+def routing_hints_from_plan_meta(meta: dict[str, Any]) -> dict[str, Any] | None:
+    """Build routing dict for insert_message from plan_router_turn meta (may be empty)."""
+    if not meta:
+        return None
+    h = _routing_insert_fragment(
+        {
+            "router_category": meta.get("router_category"),
+            "keyword_category": meta.get("keyword_category"),
+            "keyword_confidence": meta.get("keyword_confidence"),
+        },
+    )
+    return h if h else None
+
+
+async def _fetch_keyword_category_hint(settings: Settings, user_message: str) -> dict[str, Any]:
+    """Keyword classify-task (+ cheap LLM tie-break on agent). Informational for UI / meta."""
+    try:
+        raw = await agent_post_json(
+            settings,
+            "api/intelligence/classify-task",
+            {"description": user_message.strip()},
+            timeout_seconds=settings.agent_timeout_seconds,
+        )
+    except AgentUnreachableError:
+        return {}
+    if not raw.get("success"):
+        return {}
+    out: dict[str, Any] = {}
+    cat = str(raw.get("category") or "").strip()
+    if cat:
+        out["keyword_category"] = cat
+    try:
+        conf = raw.get("confidence")
+        if conf is not None:
+            out["keyword_confidence"] = float(conf)
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 _CONVERSATIONAL_PATTERNS = (
     "thank",
     "thanks",
@@ -98,11 +300,80 @@ _CONVERSATIONAL_PATTERNS = (
     "describe ",
 )
 
+# When present, the user is asking for actionable security work — do not skip tool routing.
+_OPERATIONAL_SECURITY_HINTS = (
+    "http://",
+    "https://",
+    "pentest",
+    "pentesting",
+    "penetration test",
+    "penetration testing",
+    "security test",
+    "security assessment",
+    "vuln scan",
+    "vulnerability scan",
+    "vulnerability assessment",
+    "security scan",
+    "port scan",
+    "subdomain",
+    "enumeration",
+    "enumerate ",
+    " recon",
+    "reconnaissance",
+    "red team",
+    "attack surface",
+    "sql injection",
+    "sqli",
+    " xss",
+    "csrf",
+    "cve-",
+    "authorized to",
+    "complete pentest",
+    "full pentest",
+    "run nuclei",
+    "run nmap",
+    " nuclei",
+    " nmap",
+    " httpx",
+    " burp",
+    " ffuf",
+    " gobuster",
+    " sqlmap",
+    " nikto",
+    " whatweb",
+)
+
+_FALLBACK_SECURITY_TOOLS_ORDER = (
+    "httpx",
+    "whatweb",
+    "nuclei",
+    "nikto",
+    "ffuf",
+    "nmap",
+)
+
 _TAIL_MESSAGES_WITH_SUMMARY = 36
+
+
+def _looks_operational_security(message: str) -> bool:
+    lower = message.lower()
+    return any(h in lower for h in _OPERATIONAL_SECURITY_HINTS)
+
+
+def _fallback_security_tool_names(by_name: dict[str, dict[str, Any]], limit: int) -> list[str]:
+    out: list[str] = []
+    for n in _FALLBACK_SECURITY_TOOLS_ORDER:
+        if n in by_name:
+            out.append(n)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _is_conversational(message: str) -> bool:
     lower = message.lower().strip()
+    if _looks_operational_security(lower):
+        return False
     if len(lower) < 20:
         return True
     for pat in _CONVERSATIONAL_PATTERNS:
@@ -219,6 +490,7 @@ async def insert_message(
     batch_execution_state: str | None = None,
     llm_messages_snapshot: list[dict[str, Any]] | None = None,
     thinking_content: str | None = None,
+    routing: dict[str, Any] | None = None,
 ) -> ObjectId:
     doc: dict[str, Any] = {
         "organization_id": organization_id,
@@ -228,6 +500,7 @@ async def insert_message(
         "content": content,
         "created_at": _utc_now(),
     }
+    doc.update(_routing_insert_fragment(routing))
     if tool_call is not None:
         doc["tool_call"] = tool_call
     if tool_calls is not None:
@@ -436,6 +709,48 @@ async def list_agent_chat_org_tools_catalog(
     return rows
 
 
+def _annotate_fallback_tool_objs(
+    by_name: dict[str, dict[str, Any]],
+    max_pick: int,
+    meta: dict[str, Any],
+    reason: str,
+) -> list[dict[str, Any]]:
+    fb = _fallback_security_tool_names(by_name, max_pick)
+    if not fb:
+        return []
+    meta["fallback_tool_names"] = fb
+    meta["fallback_reason"] = reason
+    return [by_name[n] for n in fb]
+
+
+async def _bridge_fetch_tool_schemas(
+    settings: Settings,
+    tools_objs: list[dict[str, Any]],
+    *,
+    timeout_seconds: float,
+    meta: dict[str, Any],
+    router_reply: str | None = None,
+) -> RouterTurnResult:
+    try:
+        schema_resp = await agent_post_json(
+            settings,
+            "api/cipherstrike/schemas-from-tools",
+            {"tools": tools_objs},
+            timeout_seconds=timeout_seconds,
+        )
+    except AgentUnreachableError as e:
+        logger.warning("agent_chat schemas unreachable: %s", e.message)
+        return RouterTurnResult("operational", None, None, {**meta, "error": e.message})
+
+    if not schema_resp.get("success"):
+        return RouterTurnResult("operational", None, None, {**meta, "schemas_error": schema_resp})
+
+    schemas = schema_resp.get("schemas")
+    if not isinstance(schemas, list):
+        schemas = []
+    return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta)
+
+
 async def plan_router_turn(
     settings: Settings,
     db: AsyncIOMotorDatabase,
@@ -466,6 +781,7 @@ async def plan_router_turn(
         logger.warning("agent_chat catalog unreachable")
         return RouterTurnResult("operational", None, None, {"success": False, "error": "Agent catalog unreachable"})
     by_name, router_catalog = ctx
+    meta.update(await _fetch_keyword_category_hint(settings, user_message))
 
     if explicit:
         meta["tool_selection"] = "explicit"
@@ -484,24 +800,13 @@ async def plan_router_turn(
                 {**meta, "explicit_tools_unresolved": True},
             )
         tools_objs = [by_name[n] for n in ordered]
-        try:
-            schema_resp = await agent_post_json(
-                settings,
-                "api/cipherstrike/schemas-from-tools",
-                {"tools": tools_objs},
-                timeout_seconds=settings.agent_timeout_seconds,
-            )
-        except AgentUnreachableError as e:
-            logger.warning("agent_chat schemas unreachable: %s", e.message)
-            return RouterTurnResult("operational", None, None, {**meta, "error": e.message})
-
-        if not schema_resp.get("success"):
-            return RouterTurnResult("operational", None, None, {**meta, "schemas_error": schema_resp})
-
-        schemas = schema_resp.get("schemas")
-        if not isinstance(schemas, list):
-            schemas = []
-        return RouterTurnResult("operational", schemas if schemas else None, None, meta)
+        return await _bridge_fetch_tool_schemas(
+            settings,
+            tools_objs,
+            timeout_seconds=settings.agent_timeout_seconds,
+            meta=meta,
+            router_reply=None,
+        )
 
     try:
         raw_route = await agent_post_json(
@@ -512,18 +817,49 @@ async def plan_router_turn(
                 "tools": router_catalog,
                 "max_tool_names": settings.agent_router_max_tools,
             },
-            timeout_seconds=settings.agent_timeout_seconds,
+            timeout_seconds=settings.agent_route_intent_timeout_seconds,
         )
     except AgentUnreachableError as e:
         logger.warning("agent_chat route-intent unreachable: %s", e.message)
-        return RouterTurnResult("operational", None, None, {"success": False, "error": e.message})
+        meta["route_intent_error"] = e.message
+        fb_objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "route_intent_unreachable")
+        if fb_objs:
+            logger.info("agent_chat: using fallback tool schemas after route-intent failure")
+            return await _bridge_fetch_tool_schemas(
+                settings,
+                fb_objs,
+                timeout_seconds=settings.agent_timeout_seconds,
+                meta=meta,
+                router_reply=None,
+            )
+        return RouterTurnResult("operational", None, None, meta)
 
     meta["route_intent"] = raw_route
+    if raw_route.get("success"):
+        rc = _normalize_router_category_slug(raw_route.get("category"))
+        if rc:
+            meta["router_category"] = rc
+
     if not raw_route.get("success"):
+        fb_objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "route_intent_unsuccessful")
+        if fb_objs:
+            logger.info("agent_chat: using fallback tool schemas after unsuccessful route-intent response")
+            return await _bridge_fetch_tool_schemas(
+                settings,
+                fb_objs,
+                timeout_seconds=settings.agent_timeout_seconds,
+                meta=meta,
+                router_reply=None,
+            )
         return RouterTurnResult("operational", None, None, meta)
 
     intent = str(raw_route.get("intent") or "conversational").lower().strip()
     reply = str(raw_route.get("reply") or "").strip() or None
+    if intent == "conversational" and _looks_operational_security(user_message):
+        intent = "operational"
+        reply = None
+        meta["intent_override"] = "security_task_hint"
+
     if intent == "conversational":
         return RouterTurnResult("conversational", None, reply, meta)
 
@@ -535,26 +871,20 @@ async def plan_router_turn(
         if isinstance(n, str) and n.strip() in by_name:
             tools_objs.append(by_name[n.strip()])
     if not tools_objs:
+        fb = _fallback_security_tool_names(by_name, max_pick)
+        if fb:
+            meta["fallback_tool_names"] = fb
+            tools_objs = [by_name[n] for n in fb]
+    if not tools_objs:
         return RouterTurnResult("operational", None, reply, meta)
 
-    try:
-        schema_resp = await agent_post_json(
-            settings,
-            "api/cipherstrike/schemas-from-tools",
-            {"tools": tools_objs},
-            timeout_seconds=settings.agent_timeout_seconds,
-        )
-    except AgentUnreachableError as e:
-        logger.warning("agent_chat schemas unreachable: %s", e.message)
-        return RouterTurnResult("operational", None, None, {**meta, "error": e.message})
-
-    if not schema_resp.get("success"):
-        return RouterTurnResult("operational", None, None, {**meta, "schemas_error": schema_resp})
-
-    schemas = schema_resp.get("schemas")
-    if not isinstance(schemas, list):
-        schemas = []
-    return RouterTurnResult("operational", schemas if schemas else None, reply, meta)
+    return await _bridge_fetch_tool_schemas(
+        settings,
+        tools_objs,
+        timeout_seconds=settings.agent_timeout_seconds,
+        meta=meta,
+        router_reply=reply,
+    )
 
 
 async def stream_cipherstrike_turn(
@@ -568,6 +898,7 @@ async def stream_cipherstrike_turn(
     session_id: ObjectId,
     tenant_roles: list[str] | None = None,
     auto_accept_tools: bool = False,
+    routing: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     """
     Forward SSE from NyxStrike cipherstrike bridge and persist assistant message on completion.
@@ -664,6 +995,7 @@ async def stream_cipherstrike_turn(
                             batch_execution_state="awaiting_quorum",
                             llm_messages_snapshot=list(llm_messages),
                             thinking_content="".join(thinking_chunks) or None,
+                            routing=routing,
                         )
                         thinking_chunks.clear()
                         out_payload = {"assistant_message_id": str(mid), "calls": calls}
@@ -719,6 +1051,7 @@ async def stream_cipherstrike_turn(
                             tool_call=tc_state,
                             llm_messages_snapshot=list(llm_messages),
                             thinking_content="".join(thinking_chunks) or None,
+                            routing=routing,
                         )
                         thinking_chunks.clear()
                         pending_data["assistant_message_id"] = str(mid)
@@ -737,6 +1070,7 @@ async def stream_cipherstrike_turn(
                             role="assistant",
                             content=full_text,
                             thinking_content=think_txt,
+                            routing=routing,
                         )
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
@@ -749,6 +1083,7 @@ async def stream_cipherstrike_turn(
                         role="assistant",
                         content=f"[Error] {err_txt}",
                         thinking_content="".join(thinking_chunks) or None,
+                        routing=routing,
                     )
                 elif payload.startswith("[THINK_TOKEN]"):
                     rest = payload[len("[THINK_TOKEN]") :].strip()
@@ -783,6 +1118,7 @@ async def stream_cipherstrike_turn(
                     role="assistant",
                     content=full_text,
                     thinking_content=think_txt,
+                    routing=routing,
                 )
                 yield "data: [DONE]\n\n"
                 await _sse_flush_tick()
@@ -837,23 +1173,48 @@ async def merge_tool_batch_decisions(
     return quorum_met, decided, len(slots)
 
 
+async def _run_one_tool_detailed(
+    settings: Settings,
+    endpoint: str,
+    args: dict[str, Any],
+) -> tuple[str, dict[str, Any], int]:
+    """Run one catalog tool via agent HTTP; returns (json_for_llm, progress_fields_for_slot, http_status_code)."""
+    ep = normalize_agent_tool_path(endpoint)
+    if agent_path_not_allowed(ep):
+        err_obj: dict[str, Any] = {"error": "Tool endpoint is not allowed."}
+        se_t, se_tr = _truncate_tool_log_tail("Tool endpoint is not allowed.")
+        meta = {
+            "run_status": "error",
+            "stdout_tail": None,
+            "stderr_tail": se_t,
+            "stdout_truncated": False,
+            "stderr_truncated": se_tr,
+            "exit_code": None,
+            "http_status": 403,
+            "run_finished_at": _utc_now_iso(),
+        }
+        return json.dumps(err_obj), meta, 403
+
+    status_code, content, _ctype = await forward_agent_post_tool(settings, ep, args)
+    try:
+        result_obj: Any = json.loads(content.decode("utf-8"))
+    except Exception:
+        raw = content.decode("utf-8", errors="replace")[:4000]
+        result_obj = {"http_status": status_code, "raw": raw}
+    result_text = json.dumps(result_obj, indent=2)
+    if len(result_text) > 4000:
+        result_text = result_text[:4000] + "\n… (truncated)"
+    meta = _progress_from_completed_run(status_code, result_obj)
+    return result_text, meta, status_code
+
+
 async def _run_one_tool(
     settings: Settings,
     endpoint: str,
     args: dict[str, Any],
 ) -> str:
-    ep = normalize_agent_tool_path(endpoint)
-    if agent_path_not_allowed(ep):
-        return json.dumps({"error": "Tool endpoint is not allowed."})
-    status_code, content, _ctype = await forward_agent_post_tool(settings, ep, args)
-    try:
-        result_obj = json.loads(content.decode("utf-8"))
-    except Exception:
-        result_obj = {"http_status": status_code, "raw": content.decode("utf-8", errors="replace")[:4000]}
-    result_text = json.dumps(result_obj, indent=2)
-    if len(result_text) > 4000:
-        result_text = result_text[:4000] + "\n… (truncated)"
-    return result_text
+    text, _meta, _status = await _run_one_tool_detailed(settings, endpoint, args)
+    return text
 
 
 async def execute_tool_slots_follow_up(
@@ -882,26 +1243,195 @@ async def execute_tool_slots_follow_up(
 
     ordered = sorted(slots, key=lambda s: int(s.get("slot_index", 0)))
 
-    async def approved_runner(slot: dict[str, Any]) -> tuple[int, str | None]:
+    working_slots: list[dict[str, Any]] = []
+    for i, slot in enumerate(ordered):
+        d = str(slot.get("human_decision") or "").lower()
+        tn = str(slot.get("tool_name") or "").strip()
+        row = dict(slot)
+        if d == "reject":
+            ts = _utc_now_iso()
+            row.update(
+                {
+                    "run_status": "skipped",
+                    "run_started_at": ts,
+                    "run_finished_at": ts,
+                    "stdout_tail": None,
+                    "stderr_tail": None,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "exit_code": None,
+                    "http_status": None,
+                },
+            )
+        elif d == "approve" and tn in disabled:
+            ts = _utc_now_iso()
+            row.update(
+                {
+                    "run_status": "skipped",
+                    "run_started_at": ts,
+                    "run_finished_at": ts,
+                    "stdout_tail": None,
+                    "stderr_tail": None,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "exit_code": None,
+                    "http_status": None,
+                },
+            )
+        elif d == "approve":
+            row.update(
+                {
+                    "run_status": "queued",
+                    "run_started_at": None,
+                    "run_finished_at": None,
+                    "stdout_tail": None,
+                    "stderr_tail": None,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "exit_code": None,
+                    "http_status": None,
+                },
+            )
+        working_slots.append(row)
+
+    approve_to_run = [
+        s
+        for s in working_slots
+        if str(s.get("human_decision") or "").lower() == "approve"
+        and str(s.get("tool_name") or "").strip() not in disabled
+    ]
+
+    batch_filter = (
+        {
+            "_id": batch_message_id,
+            "session_id": session_id,
+            "organization_id": organization_id,
+            "user_id": user_id,
+        }
+        if batch_message_id is not None
+        else None
+    )
+
+    if batch_message_id is not None and batch_filter is not None:
+        await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
+            batch_filter,
+            {"$set": {"tool_calls": working_slots, "batch_execution_state": "executing"}},
+        )
+        await _sse_flush_tick()
+
+    prog_q: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    async def exec_approved(slot: dict[str, Any]) -> None:
         idx = int(slot.get("slot_index", 0))
         tn = str(slot.get("tool_name") or "")
-        if tn.strip() in disabled:
-            return idx, None
         endpoint = str(slot.get("endpoint") or "")
         args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
+        started = _utc_now_iso()
+        await prog_q.put(("running", idx, tn, started))
         try:
-            text = await _run_one_tool(settings, endpoint, args)
-            return idx, text
+            result_text, prog, _http = await _run_one_tool_detailed(settings, endpoint, args)
         except Exception as exc:
             logger.exception("batch tool %s", tn)
-            return idx, json.dumps({"error": str(exc)})
+            se_t, se_tr = _truncate_tool_log_tail(str(exc))
+            fin = _utc_now_iso()
+            prog = {
+                "run_status": "error",
+                "stdout_tail": None,
+                "stderr_tail": se_t,
+                "stdout_truncated": False,
+                "stderr_truncated": se_tr,
+                "exit_code": None,
+                "http_status": None,
+                "run_finished_at": fin,
+            }
+            result_text = json.dumps({"error": str(exc)})
+        await prog_q.put(("finished", idx, tn, result_text, prog))
 
-    approve_slots = [s for s in ordered if str(s.get("human_decision") or "").lower() == "approve"]
-    parallel_pairs = await asyncio.gather(*[approved_runner(s) for s in approve_slots])
+    exec_tasks = [asyncio.create_task(exec_approved(s)) for s in approve_to_run]
+    pending_finish = len(exec_tasks)
+
+    async def persist_working_if_batch() -> None:
+        if batch_message_id is not None and batch_filter is not None:
+            await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
+                batch_filter,
+                {"$set": {"tool_calls": working_slots, "batch_execution_state": "executing"}},
+            )
+
     results_by_idx: dict[int, str] = {}
-    for idx, txt in parallel_pairs:
-        if txt is not None:
-            results_by_idx[idx] = txt
+
+    while pending_finish > 0:
+        kind, *rest = await prog_q.get()
+        if kind == "running":
+            idx, tn, started = int(rest[0]), str(rest[1]), str(rest[2])
+            patch_run = {
+                "run_status": "running",
+                "run_started_at": started,
+                "stdout_tail": None,
+                "stderr_tail": None,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "exit_code": None,
+                "http_status": None,
+            }
+            _merge_slot_patch(working_slots, idx, patch_run)
+            await persist_working_if_batch()
+            if batch_message_id is not None:
+                yield _sse_tool_batch_slot_progress(
+                    batch_message_id,
+                    _slot_progress_payload(
+                        slot_index=idx,
+                        tool_name=tn,
+                        run_status="running",
+                        stdout_tail=None,
+                        stderr_tail=None,
+                        stdout_truncated=False,
+                        stderr_truncated=False,
+                        exit_code=None,
+                        http_status=None,
+                        started_at=started,
+                        finished_at=None,
+                    ),
+                )
+                await _sse_flush_tick()
+        elif kind == "finished":
+            idx = int(rest[0])
+            tn = str(rest[1])
+            result_text = str(rest[2])
+            prog = dict(rest[3])
+            results_by_idx[idx] = result_text
+            _merge_slot_patch(working_slots, idx, prog)
+            await persist_working_if_batch()
+            row = next(
+                (s for i, s in enumerate(working_slots) if int(s.get("slot_index", i)) == idx),
+                {},
+            )
+            if batch_message_id is not None:
+                yield _sse_tool_batch_slot_progress(
+                    batch_message_id,
+                    _slot_progress_payload(
+                        slot_index=idx,
+                        tool_name=tn,
+                        run_status=str(prog.get("run_status") or "done"),
+                        stdout_tail=prog.get("stdout_tail"),
+                        stderr_tail=prog.get("stderr_tail"),
+                        stdout_truncated=bool(prog.get("stdout_truncated")),
+                        stderr_truncated=bool(prog.get("stderr_truncated")),
+                        exit_code=prog.get("exit_code"),
+                        http_status=prog.get("http_status"),
+                        started_at=row.get("run_started_at") if isinstance(row.get("run_started_at"), str) else None,
+                        finished_at=prog.get("run_finished_at")
+                        if isinstance(prog.get("run_finished_at"), str)
+                        else None,
+                    ),
+                )
+                await _sse_flush_tick()
+            pending_finish -= 1
+
+    def _working_row_for_slot_index(si: int) -> dict[str, Any]:
+        return next(
+            (s for i, s in enumerate(working_slots) if int(s.get("slot_index", i)) == int(si)),
+            {},
+        )
 
     follow_tool_msgs: list[dict[str, str]] = []
     updated_slots: list[dict[str, Any]] = []
@@ -910,6 +1440,7 @@ async def execute_tool_slots_follow_up(
         tn = str(slot.get("tool_name") or "")
         decision = str(slot.get("human_decision") or "").lower()
         args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
+        cur = _working_row_for_slot_index(idx)
 
         if decision == "reject":
             skip_txt = f"[Skipped **{tn}** — operator rejected]"
@@ -922,7 +1453,7 @@ async def execute_tool_slots_follow_up(
                 content=skip_txt,
             )
             follow_tool_msgs.append({"role": "tool", "content": skip_txt})
-            updated_slots.append({**slot, "execution_outcome": "rejected"})
+            updated_slots.append({**cur, "execution_outcome": "rejected"})
             continue
 
         if tn.strip() in disabled:
@@ -944,7 +1475,7 @@ async def execute_tool_slots_follow_up(
                 content=err_txt,
             )
             follow_tool_msgs.append({"role": "tool", "content": err_txt})
-            updated_slots.append({**slot, "execution_outcome": "blocked"})
+            updated_slots.append({**cur, "execution_outcome": "blocked"})
             continue
 
         result_text = results_by_idx.get(idx)
@@ -972,13 +1503,19 @@ async def execute_tool_slots_follow_up(
             content=result_text,
         )
         follow_tool_msgs.append({"role": "tool", "content": result_text})
-        updated_slots.append({**slot, "execution_outcome": "completed"})
+        eo = (
+            "error"
+            if str(cur.get("run_status") or "") == "error"
+            else "completed"
+        )
+        updated_slots.append({**cur, "execution_outcome": eo})
 
-    if batch_message_id is not None:
+    if batch_message_id is not None and batch_filter is not None:
         await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
-            {"_id": batch_message_id},
+            batch_filter,
             {"$set": {"batch_execution_state": "completed", "tool_calls": updated_slots}},
         )
+        await touch_session(db, session_id)
 
     follow_llm = list(snapshot) + follow_tool_msgs
     async for chunk in stream_follow_up_after_tool(
