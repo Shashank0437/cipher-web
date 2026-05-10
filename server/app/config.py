@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     )
     # Long-lived HTTP timeouts for synchronous tool executions proxied by POST /workspace/tools/run
     agent_tool_run_timeout_seconds: float = Field(
-        default=900.0,
+        default=1800.0,
         validation_alias=AliasChoices("AGENT_TOOL_RUN_TIMEOUT_SECONDS"),
     )
     # Agent bridge (Flask /api/cipherstrike/*) — optional shared secret with NyxStrike CIPHERSTRIKE_BRIDGE_SECRET.

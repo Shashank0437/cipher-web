@@ -282,6 +282,7 @@ async function consumeSse(
 
   const decoder = new TextDecoder();
   let buffer = "";
+  let sawDone = false;
 
   while (!signal?.aborted) {
     const { done, value } = await reader.read();
@@ -300,6 +301,7 @@ async function consumeSse(
         if (ev) {
           await dispatchSseEvent(ev, onEvent);
           if (ev.type === "done") {
+            sawDone = true;
             await reader.cancel().catch(() => {});
             return;
           }
@@ -313,8 +315,16 @@ async function consumeSse(
     const data = sseBlockToData(buffer);
     if (data) {
       const ev = parseAgentChatSsePayload(data);
-      if (ev) await dispatchSseEvent(ev, onEvent);
+      if (ev) {
+        await dispatchSseEvent(ev, onEvent);
+        if (ev.type === "done") sawDone = true;
+      }
     }
+  }
+
+  // Server/proxy closed the body without ``[DONE]`` (e.g. legacy agent error path). Unstick the UI.
+  if (!sawDone) {
+    await dispatchSseEvent({ type: "done" }, onEvent);
   }
 }
 

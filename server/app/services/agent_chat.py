@@ -1977,36 +1977,50 @@ async def execute_tool_slots_follow_up(
         async def emit_live(payload: dict[str, Any]) -> None:
             await prog_q.put(("stream_progress", idx, tn, payload))
 
+        fin = _utc_now_iso()
+        prog: dict[str, Any] = {
+            "run_status": "error",
+            "stdout_tail": None,
+            "stderr_tail": "Tool execution interrupted before completion",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "exit_code": None,
+            "http_status": None,
+            "run_finished_at": fin,
+        }
+        result_text = json.dumps({"error": "Tool execution interrupted before completion"})
         try:
-            result_text, prog, _http = await _run_one_tool_detailed(
-                settings,
-                endpoint,
-                args,
-                emit_slot_progress=emit_live,
-                progress_context={
-                    "slot_index": idx,
-                    "tool_name": tn,
-                    "started_at": started,
-                },
-                chat_tool_context=(db, organization_id, user_id, session_id),
-                enrichment_tool_name=tn,
-            )
-        except Exception as exc:
-            logger.exception("batch tool %s", tn)
-            se_t, se_tr = _truncate_tool_log_tail(str(exc))
-            fin = _utc_now_iso()
-            prog = {
-                "run_status": "error",
-                "stdout_tail": None,
-                "stderr_tail": se_t,
-                "stdout_truncated": False,
-                "stderr_truncated": se_tr,
-                "exit_code": None,
-                "http_status": None,
-                "run_finished_at": fin,
-            }
-            result_text = json.dumps({"error": str(exc)})
-        await prog_q.put(("finished", idx, tn, result_text, prog))
+            try:
+                result_text, prog, _http = await _run_one_tool_detailed(
+                    settings,
+                    endpoint,
+                    args,
+                    emit_slot_progress=emit_live,
+                    progress_context={
+                        "slot_index": idx,
+                        "tool_name": tn,
+                        "started_at": started,
+                    },
+                    chat_tool_context=(db, organization_id, user_id, session_id),
+                    enrichment_tool_name=tn,
+                )
+            except Exception as exc:
+                logger.exception("batch tool %s", tn)
+                se_t, se_tr = _truncate_tool_log_tail(str(exc))
+                fin_err = _utc_now_iso()
+                prog = {
+                    "run_status": "error",
+                    "stdout_tail": None,
+                    "stderr_tail": se_t,
+                    "stdout_truncated": False,
+                    "stderr_truncated": se_tr,
+                    "exit_code": None,
+                    "http_status": None,
+                    "run_finished_at": fin_err,
+                }
+                result_text = json.dumps({"error": str(exc)})
+        finally:
+            await prog_q.put(("finished", idx, tn, result_text, prog))
 
     exec_tasks = [asyncio.create_task(exec_approved(s)) for s in approve_to_run]
     pending_finish = len(exec_tasks)
@@ -2465,6 +2479,10 @@ async def stream_follow_up_after_tool(
                     content=full_text,
                     thinking_content=think_txt,
                 )
+            yield "data: [DONE]\n\n"
+        elif not seen_done:
+            # Agent closed the stream without a terminal marker (misbehaving proxy, partial
+            # generator, or legacy agent). Unblock the UI so it stops showing "Agent is working".
             yield "data: [DONE]\n\n"
     except AgentUnreachableError as e:
         yield f"data: [ERROR] {e.message}\n\n"
