@@ -1291,24 +1291,64 @@ async def _bridge_fetch_tool_schemas(
     return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta)
 
 
-def _build_router_context(rows: list[dict[str, Any]] | None) -> str:
+_TARGET_HINT_RE = re.compile(r"https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b")
+
+
+def _build_router_context(rows: list[dict[str, Any]] | None, *, current_user_message: str = "") -> str:
     """Compact recent user+assistant turns into a short context string for the router LLM.
-    Skips tool-marker assistant messages to avoid feeding tool-call markup back as user context.
+
+    Strategy:
+    - Walks the recent history (last 16 messages) excluding the current user message.
+    - Includes user turns, plain assistant turns, AND extracts target hints (URLs / IPs / hostnames)
+      from tool-execution markup so the router can resolve "same" / "this" references.
+    - Surfaces the most recent target found as a dedicated line so the router can't miss it.
     """
     if not rows:
         return ""
+    cur_msg_norm = (current_user_message or "").strip()
     parts: list[str] = []
-    # Walk back through up to last 8 messages, keep last 4 useful turns
-    for m in reversed(rows[-10:]):
+    seen_targets: list[str] = []  # ordered, most recent first
+
+    def _maybe_record_targets(text: str) -> None:
+        for m in _TARGET_HINT_RE.finditer(text or ""):
+            tok = m.group(0)
+            # Strip JSON / markup punctuation that ended up captured.
+            tok = tok.strip().strip(".,;:!?\"'`")
+            tok = tok.rstrip("/}")  # trailing slash or JSON closer
+            # Strip a single trailing quote-plus-brace fragment that often appears in tool markup.
+            for tail in ("\"}", "'}", "\")", "')", ".com\"}", ".org\"}"):
+                if tok.endswith(tail) and len(tok) > len(tail):
+                    tok = tok[: -len(tail) + (4 if tail.startswith(".") else 0)]
+                    break
+            tok = tok.strip().strip(".,;:!?\"'`")
+            if not tok or tok.lower() in {"e.g", "i.e"}:
+                continue
+            # Dedup (most recent wins)
+            if tok not in seen_targets:
+                seen_targets.append(tok)
+
+    # Walk last 16 rows from newest to oldest. Skip the current user message (last user row matching).
+    skipped_current = False
+    for m in reversed(rows[-16:]):
         role = str(m.get("role") or "")
-        if role not in ("user", "assistant"):
-            continue
         content = str(m.get("content") or "").strip()
         if not content:
             continue
-        if role == "assistant" and ("[Tool " in content or "[TOOL_" in content or "Tool batch pending" in content):
+        if role == "user" and not skipped_current and cur_msg_norm and content.strip() == cur_msg_norm:
+            skipped_current = True
             continue
-        # Trim long assistant messages
+        if role == "tool":
+            # Tool result messages often carry the target/URL; mine them for hints only.
+            _maybe_record_targets(content)
+            continue
+        if role == "assistant" and ("[Tool " in content or "[TOOL_" in content or "Tool batch pending" in content):
+            # Mine the assistant tool markup for targets, but don't include the markup text.
+            _maybe_record_targets(content)
+            continue
+        if role not in ("user", "assistant"):
+            continue
+        # Useful prose turn — keep it.
+        _maybe_record_targets(content)
         if len(content) > 400:
             content = content[:400] + "…"
         label = "User" if role == "user" else "Assistant"
@@ -1316,7 +1356,12 @@ def _build_router_context(rows: list[dict[str, Any]] | None) -> str:
         if len(parts) >= 4:
             break
     parts.reverse()
-    return "\n".join(parts)
+    block = "\n".join(parts)
+    if seen_targets:
+        # Surface the most recent target prominently so the router can resolve pronouns.
+        target_line = f"Most recent target(s) in this conversation: {', '.join(seen_targets[:3])}"
+        block = (block + "\n" + target_line).strip() if block else target_line
+    return block
 
 
 async def plan_router_turn(
@@ -1355,7 +1400,7 @@ async def plan_router_turn(
                 "tools": router_catalog_pick,
                 "max_tool_names": settings.agent_router_max_tools,
             }
-            pick_context = _build_router_context(rows)
+            pick_context = _build_router_context(rows, current_user_message=user_message)
             if pick_context:
                 route_intent_pick_payload["context"] = pick_context
             raw_pick = await agent_post_json(
@@ -1414,7 +1459,7 @@ async def plan_router_turn(
             router_reply=None,
         )
 
-    router_context = _build_router_context(rows)
+    router_context = _build_router_context(rows, current_user_message=user_message)
     try:
         route_intent_payload: dict[str, Any] = {
             "message": user_message.strip(),
