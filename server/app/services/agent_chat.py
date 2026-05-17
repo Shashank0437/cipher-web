@@ -1291,6 +1291,34 @@ async def _bridge_fetch_tool_schemas(
     return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta)
 
 
+def _build_router_context(rows: list[dict[str, Any]] | None) -> str:
+    """Compact recent user+assistant turns into a short context string for the router LLM.
+    Skips tool-marker assistant messages to avoid feeding tool-call markup back as user context.
+    """
+    if not rows:
+        return ""
+    parts: list[str] = []
+    # Walk back through up to last 8 messages, keep last 4 useful turns
+    for m in reversed(rows[-10:]):
+        role = str(m.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "assistant" and ("[Tool " in content or "[TOOL_" in content or "Tool batch pending" in content):
+            continue
+        # Trim long assistant messages
+        if len(content) > 400:
+            content = content[:400] + "…"
+        label = "User" if role == "user" else "Assistant"
+        parts.append(f"{label}: {content}")
+        if len(parts) >= 4:
+            break
+    parts.reverse()
+    return "\n".join(parts)
+
+
 async def plan_router_turn(
     settings: Settings,
     db: AsyncIOMotorDatabase,
@@ -1298,6 +1326,7 @@ async def plan_router_turn(
     organization_id: ObjectId,
     user_message: str,
     explicit_tool_names: list[str] | None = None,
+    rows: list[dict[str, Any]] | None = None,
 ) -> RouterTurnResult:
     """CipherStrike router — replaces classify-task; returns schemas for main LLM or conversational branch."""
     meta: dict[str, Any] = {}
@@ -1321,14 +1350,18 @@ async def plan_router_turn(
         _by_pick, router_catalog_pick = ctx_pick
         meta_pick.update(await _fetch_keyword_category_hint(settings, user_message))
         try:
+            route_intent_pick_payload: dict[str, Any] = {
+                "message": user_message.strip(),
+                "tools": router_catalog_pick,
+                "max_tool_names": settings.agent_router_max_tools,
+            }
+            pick_context = _build_router_context(rows)
+            if pick_context:
+                route_intent_pick_payload["context"] = pick_context
             raw_pick = await agent_post_json(
                 settings,
                 "api/cipherstrike/route-intent",
-                {
-                    "message": user_message.strip(),
-                    "tools": router_catalog_pick,
-                    "max_tool_names": settings.agent_router_max_tools,
-                },
+                route_intent_pick_payload,
                 timeout_seconds=settings.agent_route_intent_timeout_seconds,
             )
         except AgentUnreachableError as e:
@@ -1381,15 +1414,19 @@ async def plan_router_turn(
             router_reply=None,
         )
 
+    router_context = _build_router_context(rows)
     try:
+        route_intent_payload: dict[str, Any] = {
+            "message": user_message.strip(),
+            "tools": router_catalog,
+            "max_tool_names": settings.agent_router_max_tools,
+        }
+        if router_context:
+            route_intent_payload["context"] = router_context
         raw_route = await agent_post_json(
             settings,
             "api/cipherstrike/route-intent",
-            {
-                "message": user_message.strip(),
-                "tools": router_catalog,
-                "max_tool_names": settings.agent_router_max_tools,
-            },
+            route_intent_payload,
             timeout_seconds=settings.agent_route_intent_timeout_seconds,
         )
     except AgentUnreachableError as e:
@@ -1497,6 +1534,7 @@ async def maybe_upgrade_router_result_for_llm(
         organization_id=organization_id,
         user_message=augmented,
         explicit_tool_names=explicit_tool_names,
+        rows=rows,
     )
     if rt2.intent == "operational" and rt2.schemas:
         meta.update(rt2.meta or {})
@@ -2407,7 +2445,34 @@ async def execute_tool_slots_follow_up(
         )
         await touch_session(db, session_id)
 
-    follow_llm = list(snapshot) + follow_tool_msgs
+    # Strip ALL tools that just ran/were-rejected from follow-up schemas + nudge to summarize.
+    ran_tool_names_lower = {
+        str(s.get("tool_name") or "").strip().lower()
+        for s in updated_slots
+        if str(s.get("tool_name") or "").strip()
+    }
+    pruned_batch_follow_schemas: list[dict[str, Any]] | None = None
+    if isinstance(resolved_follow_schemas, list):
+        pruned_batch_follow_schemas = [
+            s for s in resolved_follow_schemas
+            if isinstance(s, dict)
+            and str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower() not in ran_tool_names_lower
+        ] or None
+    completed_names = sorted(
+        str(s.get("tool_name") or "").strip()
+        for s in updated_slots
+        if str(s.get("execution_outcome") or "").lower() in ("completed", "done", "success")
+    )
+    batch_summarize_system = {
+        "role": "system",
+        "content": (
+            f"The following tools just ran: {', '.join(completed_names) or '(see prior messages)'}. "
+            "Their results are in the tool messages that follow. Summarize ALL findings in a single concise "
+            "prose response for the operator (group by tool, highlight notable findings, suggest next steps). "
+            "Do NOT re-call any of the tools that already ran in this batch."
+        ),
+    }
+    follow_llm = list(snapshot) + [batch_summarize_system] + follow_tool_msgs
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -2416,9 +2481,10 @@ async def execute_tool_slots_follow_up(
         session_id=session_id,
         llm_messages=follow_llm,
         carry_thinking=carry_thinking,
-        tool_schemas=resolved_follow_schemas,
+        tool_schemas=pruned_batch_follow_schemas,
         tenant_roles=tenant_roles,
         auto_accept_tools=auto_accept_tools,
+        batch_exclude_tool_names=frozenset(ran_tool_names_lower) if ran_tool_names_lower else None,
     ):
         yield chunk
 
@@ -2520,7 +2586,24 @@ async def _auto_execute_single_tool_sse(
         tool_name=tool_name,
     )
 
-    follow_msgs = list(snapshot) + [tool_result_llm_message(result_text, tool_name)]
+    # Strip the just-executed tool from follow-up schemas + nudge model to summarize.
+    ran_tool_lower = tool_name.strip().lower()
+    pruned_follow_schemas: list[dict[str, Any]] | None = None
+    if isinstance(follow_tool_schemas, list):
+        pruned_follow_schemas = [
+            s for s in follow_tool_schemas
+            if isinstance(s, dict)
+            and str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower() != ran_tool_lower
+        ] or None
+    summarize_system = {
+        "role": "system",
+        "content": (
+            f"The {tool_name} tool just ran and its result is in the previous tool message. "
+            "Summarize the findings in plain prose for the operator: what was discovered, what stands out, "
+            "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments."
+        ),
+    }
+    follow_msgs = list(snapshot) + [summarize_system, tool_result_llm_message(result_text, tool_name)]
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -2529,9 +2612,10 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         llm_messages=follow_msgs,
         carry_thinking=carry_thinking,
-        tool_schemas=follow_tool_schemas,
+        tool_schemas=pruned_follow_schemas,
         tenant_roles=roles_l,
         auto_accept_tools=auto_accept_tools,
+        batch_exclude_tool_names=frozenset({ran_tool_lower}),
     ):
         yield chunk
 

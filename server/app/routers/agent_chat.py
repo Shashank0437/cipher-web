@@ -385,6 +385,7 @@ async def post_message_stream(
                     organization_id=user["organization_id"],
                     user_message=user_msg,
                     explicit_tool_names=explicit_arg,
+                    rows=rows,
                 )
             except Exception:
                 logger.exception("plan_router_turn")
@@ -782,7 +783,30 @@ async def tool_confirm_stream(
             )
             await _sse_flush_tick()
 
-            follow_msgs = list(snapshot) + [tool_result_llm_message(result_text, tool_name)]
+            # Strip the just-executed tool from follow-up schemas so the model can't
+            # re-call it, and inject an explicit "summarize, don't re-call" nudge.
+            ran_tool_lower = tool_name.strip().lower()
+            pruned_follow_schemas: list[dict[str, Any]] | None = None
+            if isinstance(follow_tool_schemas, list):
+                pruned_follow_schemas = [
+                    s for s in follow_tool_schemas
+                    if isinstance(s, dict)
+                    and str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower() != ran_tool_lower
+                ] or None
+            summarize_system = {
+                "role": "system",
+                "content": (
+                    f"The {tool_name} tool just ran and its result is in the previous tool message. "
+                    "Your job NOW is to summarize the findings in plain prose for the operator: "
+                    "what was discovered, what stands out, and what (if anything) to do next. "
+                    "Do NOT re-call the same tool with the same arguments. "
+                    "If a different tool is genuinely needed, you may call it — otherwise, write a clear summary."
+                ),
+            }
+            follow_msgs = list(snapshot) + [
+                summarize_system,
+                tool_result_llm_message(result_text, tool_name),
+            ]
             async for chunk in stream_follow_up_after_tool(
                 settings,
                 db,
@@ -790,7 +814,8 @@ async def tool_confirm_stream(
                 user_id=user["_id"],
                 session_id=sid,
                 llm_messages=follow_msgs,
-                tool_schemas=follow_tool_schemas,
+                tool_schemas=pruned_follow_schemas,
+                batch_exclude_tool_names=frozenset({ran_tool_lower}),
             ):
                 yield chunk
         except AgentUnreachableError as e:
