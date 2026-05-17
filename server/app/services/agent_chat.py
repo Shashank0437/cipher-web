@@ -1293,6 +1293,48 @@ async def _bridge_fetch_tool_schemas(
 
 _TARGET_HINT_RE = re.compile(r"https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b")
 
+# Pronouns / references that point at a target the user mentioned earlier.
+_PRONOUN_TARGET_RE = re.compile(
+    r"\b(same|this|that|it|the\s+target|same\s+target|the\s+same|previous\s+target)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_target_token(tok: str) -> str:
+    tok = (tok or "").strip().strip(".,;:!?\"'`")
+    tok = tok.rstrip("/}")
+    for tail in ("\"}", "'}", "\")", "')", ".com\"}", ".org\"}"):
+        if tok.endswith(tail) and len(tok) > len(tail):
+            tok = tok[: -len(tail) + (4 if tail.startswith(".") else 0)]
+            break
+    return tok.strip().strip(".,;:!?\"'`")
+
+
+def recent_target_from_rows(rows: list[dict[str, Any]] | None, *, current_user_message: str = "") -> str:
+    """Return the most recent target (URL / IP / hostname) mentioned in the conversation, or ''."""
+    if not rows:
+        return ""
+    cur_msg_norm = (current_user_message or "").strip()
+    skipped_current = False
+    for m in reversed(rows[-32:]):
+        role = str(m.get("role") or "")
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user" and not skipped_current and cur_msg_norm and content.strip() == cur_msg_norm:
+            skipped_current = True
+            continue
+        for match in _TARGET_HINT_RE.finditer(content):
+            tok = _clean_target_token(match.group(0))
+            if not tok or tok.lower() in {"e.g", "i.e"}:
+                continue
+            return tok
+    return ""
+
+
+def message_references_pronoun_target(user_message: str) -> bool:
+    return bool(_PRONOUN_TARGET_RE.search(user_message or ""))
+
 
 def _build_router_context(rows: list[dict[str, Any]] | None, *, current_user_message: str = "") -> str:
     """Compact recent user+assistant turns into a short context string for the router LLM.

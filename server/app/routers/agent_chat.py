@@ -35,6 +35,8 @@ from app.services.agent_chat import (
     _EXPLICIT_RUN_TOOL_RE,
     _agent_chat_skip_tool_approval_prompt,
     _looks_like_contextual_tool_follow_up,
+    message_references_pronoun_target,
+    recent_target_from_rows,
     infer_retry_rejected_tool_names,
     looks_like_retry_rejected_tools,
     retry_rejected_tools_system_note,
@@ -378,6 +380,31 @@ async def post_message_stream(
             )
 
             explicit_arg = explicit_for_turn if explicit_for_turn else None
+
+            # Short-circuit: pronoun reference (same/this/that/it/the target) WITHOUT a
+            # resolvable target in the conversation history → ask the user to specify, do
+            # NOT call the LLM (it will produce empty responses or hallucinate).
+            if message_references_pronoun_target(user_msg) and not explicit_arg:
+                _recent_target = recent_target_from_rows(rows, current_user_message=user_msg)
+                if not _recent_target:
+                    ask_text = (
+                        "You used a pronoun like 'same' / 'this' / 'the target', but I don't see a target "
+                        "in our recent conversation. Which target (URL, hostname, or IP) should I use?"
+                    )
+                    for i in range(0, len(ask_text), 72):
+                        yield f"data: {json.dumps(ask_text[i:i + 72])}\n\n"
+                        await asyncio.sleep(0)
+                    await insert_message(
+                        db,
+                        organization_id=user["organization_id"],
+                        user_id=user["_id"],
+                        session_id=sid,
+                        role="assistant",
+                        content=ask_text,
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+
             try:
                 rt = await plan_router_turn(
                     settings,
