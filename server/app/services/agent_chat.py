@@ -1503,7 +1503,12 @@ async def maybe_upgrade_router_result_for_llm(
         meta["router_recovery"] = "augmented_user_message"
         return RouterTurnResult("operational", rt2.schemas, rt2.router_reply, meta)
 
-    allow_catalog_fallback = op_no_schema or explicit or _looks_like_short_tool_approval(user_message)
+    allow_catalog_fallback = (
+        op_no_schema
+        or explicit
+        or is_explicit_run
+        or _looks_like_short_tool_approval(user_message)
+    )
     if not allow_catalog_fallback:
         meta["router_recovery"] = "skipped_fallback_not_action_like"
         return rt
@@ -2612,6 +2617,22 @@ async def stream_follow_up_after_tool(
     body: dict[str, Any] = {"messages": llm_messages}
     if tool_schemas:
         body["schemas"] = tool_schemas
+    # Build a set of (tool_name, args_json) for tool results already in the snapshot — these
+    # already ran in this turn chain. If the follow-up LLM tries to re-call any of them with
+    # identical args, drop the call to break the loop instead of re-launching the tool.
+    recent_tool_runs: set[tuple[str, str]] = set()
+    for _m in llm_messages:
+        if not isinstance(_m, dict):
+            continue
+        if str(_m.get("role") or "") != "tool":
+            continue
+        _tn = str(_m.get("name") or _m.get("tool_name") or "").strip().lower()
+        if not _tn:
+            continue
+        # The args used for the call live on the preceding assistant message's tool_call/tool_calls,
+        # but we lack that here; key on tool_name alone for the snapshot since identical-tool
+        # back-to-back calls are the loop we're breaking. Args-aware dedup happens per pending event.
+        recent_tool_runs.add((_tn, ""))
     assistant_chunks: list[str] = []
     thinking_chunks: list[str] = []
     if carry_thinking and str(carry_thinking).strip():
@@ -2619,6 +2640,14 @@ async def stream_follow_up_after_tool(
     buffer = ""
     seen_done = False
     tool_pending_persisted = False
+
+    def _is_duplicate_tool_call(tn: str, args: dict[str, Any]) -> bool:
+        key_name = (tn or "").strip().lower()
+        if not key_name:
+            return False
+        # If this tool already ran in the conversation snapshot we're following up from,
+        # treat the new call as a loop and suppress it.
+        return (key_name, "") in recent_tool_runs
 
     async def _persist_partial_before_tool() -> None:
         full_text = "".join(assistant_chunks).strip()
@@ -2654,7 +2683,6 @@ async def stream_follow_up_after_tool(
                 payload = data_lines[0][6:].strip() if data_lines else ""
 
                 if payload.startswith("[TOOL_CALL_BATCH_PENDING]"):
-                    await _persist_partial_before_tool()
                     rest = payload[len("[TOOL_CALL_BATCH_PENDING]") :].strip()
                     try:
                         envelope = json.loads(rest)
@@ -2666,9 +2694,18 @@ async def stream_follow_up_after_tool(
                         only_tool_names=batch_only_tool_names,
                         exclude_tool_names=batch_exclude_tool_names,
                     )
+                    # Drop calls that duplicate tools already executed in this snapshot.
+                    calls = [
+                        c for c in calls
+                        if isinstance(c, dict) and not _is_duplicate_tool_call(
+                            str(c.get("tool_name") or ""),
+                            c.get("arguments") if isinstance(c.get("arguments"), dict) else {},
+                        )
+                    ]
                     if not calls:
                         skip_outer_yield = True
                         continue
+                    await _persist_partial_before_tool()
                     slots = []
                     for i, c in enumerate(calls):
                         if not isinstance(c, dict):
@@ -2710,7 +2747,6 @@ async def stream_follow_up_after_tool(
                         skip_outer_yield = False
 
                 elif payload.startswith("[TOOL_CALL_PENDING]"):
-                    await _persist_partial_before_tool()
                     rest = payload[len("[TOOL_CALL_PENDING]") :].strip()
                     try:
                         pending_data = json.loads(rest)
@@ -2724,6 +2760,31 @@ async def stream_follow_up_after_tool(
                     )
                     endpoint = str(pending_data.get("endpoint") or "")
                     desc = str(pending_data.get("description") or "")
+                    _tn_lower = tool_name.strip().lower()
+                    # Suppress excluded / non-allowed / duplicate calls BEFORE persisting any
+                    # partial assistant text — otherwise we leave a stale "(continuing…)" message.
+                    if batch_exclude_tool_names and _tn_lower in batch_exclude_tool_names:
+                        logger.info(
+                            "stream_follow_up_after_tool: suppressing excluded tool call name=%r (operator previously rejected)",
+                            tool_name,
+                        )
+                        skip_outer_yield = True
+                        continue
+                    if batch_only_tool_names is not None and _tn_lower not in batch_only_tool_names:
+                        logger.info(
+                            "stream_follow_up_after_tool: suppressing non-allowed tool call name=%r",
+                            tool_name,
+                        )
+                        skip_outer_yield = True
+                        continue
+                    if _is_duplicate_tool_call(tool_name, args):
+                        logger.info(
+                            "stream_follow_up_after_tool: suppressing duplicate tool call name=%r (already ran in this chain)",
+                            tool_name,
+                        )
+                        skip_outer_yield = True
+                        continue
+                    await _persist_partial_before_tool()
                     single_auto = auto_accept_tools or _agent_chat_skip_tool_approval_prompt(tool_name)
                     if single_auto and tool_name.strip():
                         carry_pre = "".join(thinking_chunks).strip() or None

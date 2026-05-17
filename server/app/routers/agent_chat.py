@@ -578,12 +578,33 @@ async def tool_confirm_stream(
                     session_id=sid,
                     role="tool",
                     content=cancel,
+                    tool_name=tool_name,
                 )
                 await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
                     {"_id": aid},
                     {"$set": {"tool_call.state": "rejected"}},
                 )
-                follow_msgs = list(snapshot) + [tool_result_llm_message(cancel, tool_name)]
+                # Strip the rejected tool from the follow-up schemas so the model literally
+                # cannot re-request it; otherwise rejection → instant re-request loop.
+                rejected_name_lower = tool_name.strip().lower()
+                pruned_schemas: list[dict[str, Any]] | None = None
+                if isinstance(follow_tool_schemas, list):
+                    pruned_schemas = [
+                        s for s in follow_tool_schemas
+                        if isinstance(s, dict)
+                        and str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower() != rejected_name_lower
+                    ] or None
+                # System note nudging the model to acknowledge the rejection and stop re-trying.
+                reject_system = {
+                    "role": "system",
+                    "content": (
+                        f"The operator rejected the {tool_name} tool call. "
+                        "Do NOT re-request the same tool. Acknowledge the rejection briefly and "
+                        "either suggest an alternative tool, ask the operator what they'd prefer, "
+                        "or wait for further instructions."
+                    ),
+                }
+                follow_msgs = list(snapshot) + [reject_system, tool_result_llm_message(cancel, tool_name)]
                 async for chunk in stream_follow_up_after_tool(
                     settings,
                     db,
@@ -591,7 +612,8 @@ async def tool_confirm_stream(
                     user_id=user["_id"],
                     session_id=sid,
                     llm_messages=follow_msgs,
-                    tool_schemas=follow_tool_schemas,
+                    tool_schemas=pruned_schemas,
+                    batch_exclude_tool_names=frozenset({rejected_name_lower}),
                 ):
                     yield chunk
                 return
