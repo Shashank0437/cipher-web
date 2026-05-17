@@ -516,6 +516,17 @@ _OPERATIONAL_SECURITY_HINTS = (
     "write up the findings",
     "write-up",
     "export report",
+    "subdomain",
+    "subfinder",
+    "amass",
+    "use both",
+    "run both",
+)
+
+_CONTEXTUAL_TOOL_FOLLOW_UP_RE = re.compile(
+    r"\b(both|them|those|these|the two|two tools|use both|run both|do both|yes|yep|yeah|"
+    r"okay|ok|sure|go ahead|please do|run them|use them)\b",
+    re.IGNORECASE,
 )
 
 _FALLBACK_SECURITY_TOOLS_ORDER = (
@@ -559,6 +570,16 @@ def _looks_like_short_tool_approval(message: str) -> bool:
     return bool(_SHORT_TOOL_APPROVAL_RE.search(message))
 
 
+def _looks_like_contextual_tool_follow_up(message: str, rows: list[dict[str, Any]]) -> bool:
+    """Short affirmations (e.g. "ok use both") after a security turn — need assistant context for routing."""
+    lower = message.lower().strip()
+    if len(lower) > 64:
+        return False
+    if not _CONTEXTUAL_TOOL_FOLLOW_UP_RE.search(lower):
+        return False
+    return session_suggests_security_follow_up(rows, tail=12)
+
+
 def _is_conversational(message: str) -> bool:
     lower = message.lower().strip()
     if _looks_operational_security(lower):
@@ -585,21 +606,23 @@ def session_suggests_security_follow_up(rows: list[dict[str, Any]], *, tail: int
     return any(h in lower for h in _OPERATIONAL_SECURITY_HINTS)
 
 
-def _augment_router_user_message(rows: list[dict[str, Any]], current: str, *, max_chars: int = 800) -> str:
-    texts: list[str] = []
+def _augment_router_user_message(rows: list[dict[str, Any]], current: str, *, max_chars: int = 1200) -> str:
+    parts: list[str] = []
     seen: set[str] = set()
-    for m in reversed(rows):
-        if str(m.get("role")) != "user":
+    for m in reversed(rows[-14:]):
+        role = str(m.get("role") or "")
+        if role not in ("user", "assistant"):
             continue
         t = str(m.get("content") or "").strip()
         if not t or t in seen:
             continue
         seen.add(t)
-        texts.append(t)
-        if len(texts) >= 6:
+        label = "User" if role == "user" else "Assistant"
+        parts.append(f"[{label}]\n{t}")
+        if len(parts) >= 8:
             break
-    texts.reverse()
-    block = "\n\n".join(texts)
+    parts.reverse()
+    block = "\n\n".join(parts)
     if len(block) > max_chars:
         block = block[-max_chars:]
     return f"{block}\n\n[Latest user message]\n{current}".strip()
@@ -1322,7 +1345,10 @@ async def maybe_upgrade_router_result_for_llm(
     explicit = bool(explicit_tool_names)
     conv_gap = (
         rt.intent == "conversational"
-        and not (rt.router_reply or "").strip()
+        and (
+            not (rt.router_reply or "").strip()
+            or _looks_like_contextual_tool_follow_up(user_message, rows)
+        )
         and (explicit or session_suggests_security_follow_up(rows))
     )
     op_no_schema = rt.intent == "operational" and not rt.schemas

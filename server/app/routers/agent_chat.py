@@ -33,6 +33,7 @@ from app.services.agent_chat import (
     TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
     _agent_chat_skip_tool_approval_prompt,
+    _looks_like_contextual_tool_follow_up,
     attachments_from_tool_result_json,
     build_llm_messages_from_history,
     context_snippet,
@@ -374,7 +375,11 @@ async def post_message_stream(
                 rt=rt,
             )
 
-            if rt.intent == "conversational" and (rt.router_reply or "").strip():
+            if (
+                rt.intent == "conversational"
+                and (rt.router_reply or "").strip()
+                and not _looks_like_contextual_tool_follow_up(body.message.strip(), rows)
+            ):
                 text = rt.router_reply.strip()
                 step = 72
                 for i in range(0, len(text), step):
