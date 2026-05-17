@@ -165,6 +165,7 @@ export function AgentChatMarkdown({ text, className, collapseToolExecutions = tr
         return (
           <details
             key={`tool-${i}`}
+            open
             className="group my-2 w-full min-w-0 overflow-hidden rounded-lg border border-outline-variant/45 bg-surface-container-lowest/70 ring-1 ring-outline-variant/30"
           >
             <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">

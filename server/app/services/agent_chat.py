@@ -1454,6 +1454,7 @@ async def stream_cipherstrike_turn(
                             batch_message_id=None,
                             carry_thinking=carry_pre_tool_thinking,
                             tool_schemas=tool_schemas,
+                            auto_accept_tools=auto_accept_tools,
                         ):
                             yield line
                         skip_outer_yield = True
@@ -1507,6 +1508,7 @@ async def stream_cipherstrike_turn(
                             tenant_roles=roles,
                             carry_thinking=carry_pre_tool_thinking,
                             follow_tool_schemas=tool_schemas,
+                            auto_accept_tools=auto_accept_tools,
                         ):
                             yield line
                         skip_outer_yield = True
@@ -1853,6 +1855,7 @@ async def execute_tool_slots_follow_up(
     batch_message_id: ObjectId | None = None,
     carry_thinking: str | None = None,
     tool_schemas: list[dict[str, Any]] | None = None,
+    auto_accept_tools: bool = False,
 ) -> AsyncIterator[str]:
     """Persist executions for each slot (approve/reject/blocked), optionally patch batch parent row, stream LLM follow-up."""
     needs_exec = any(str(s.get("human_decision") or "").lower() == "approve" for s in slots)
@@ -2221,6 +2224,8 @@ async def execute_tool_slots_follow_up(
         llm_messages=follow_llm,
         carry_thinking=carry_thinking,
         tool_schemas=resolved_follow_schemas,
+        tenant_roles=tenant_roles,
+        auto_accept_tools=auto_accept_tools,
     ):
         yield chunk
 
@@ -2239,6 +2244,7 @@ async def _auto_execute_single_tool_sse(
     tenant_roles: list[str],
     carry_thinking: str | None = None,
     follow_tool_schemas: list[dict[str, Any]] | None = None,
+    auto_accept_tools: bool = False,
 ) -> AsyncIterator[str]:
     roles_l = list(tenant_roles or [])
     if "tenant_admin" not in roles_l and not _agent_chat_skip_tool_approval_prompt(tool_name):
@@ -2277,6 +2283,8 @@ async def _auto_execute_single_tool_sse(
             llm_messages=follow_llm,
             carry_thinking=carry_thinking,
             tool_schemas=follow_tool_schemas,
+            tenant_roles=roles_l,
+            auto_accept_tools=auto_accept_tools,
         ):
             yield chunk
         return
@@ -2327,6 +2335,8 @@ async def _auto_execute_single_tool_sse(
         llm_messages=follow_msgs,
         carry_thinking=carry_thinking,
         tool_schemas=follow_tool_schemas,
+        tenant_roles=roles_l,
+        auto_accept_tools=auto_accept_tools,
     ):
         yield chunk
 
@@ -2400,7 +2410,12 @@ async def stream_follow_up_after_tool(
     llm_messages: list[dict[str, Any]],
     carry_thinking: str | None = None,
     tool_schemas: list[dict[str, Any]] | None = None,
+    tenant_roles: list[str] | None = None,
+    auto_accept_tools: bool = False,
+    routing: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
+    """Post-tool LLM stream; handles further tool calls like the primary agent stream."""
+    roles = list(tenant_roles or [])
     timeout = settings.agent_llm_stream_timeout_seconds
     body: dict[str, Any] = {"messages": llm_messages}
     if tool_schemas:
@@ -2411,6 +2426,26 @@ async def stream_follow_up_after_tool(
         thinking_chunks.append(str(carry_thinking).strip())
     buffer = ""
     seen_done = False
+
+    async def _persist_partial_before_tool() -> None:
+        full_text = "".join(assistant_chunks).strip()
+        think_txt = "".join(thinking_chunks).strip() or None
+        if not full_text and not think_txt:
+            return
+        await insert_message(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            role="assistant",
+            content=full_text or "(continuing with tool calls…)",
+            thinking_content=think_txt,
+            routing=routing,
+            llm_tool_schemas=tool_schemas,
+        )
+        assistant_chunks.clear()
+        thinking_chunks.clear()
+
     try:
         async for text_chunk in agent_post_sse_stream(
             settings,
@@ -2421,8 +2456,123 @@ async def stream_follow_up_after_tool(
             buffer += text_chunk
             while "\n\n" in buffer:
                 raw_event, buffer = buffer.split("\n\n", 1)
+                skip_outer_yield = False
                 data_lines = [ln for ln in raw_event.split("\n") if ln.startswith("data: ")]
                 payload = data_lines[0][6:].strip() if data_lines else ""
+
+                if payload.startswith("[TOOL_CALL_BATCH_PENDING]"):
+                    await _persist_partial_before_tool()
+                    rest = payload[len("[TOOL_CALL_BATCH_PENDING]") :].strip()
+                    try:
+                        envelope = json.loads(rest)
+                    except json.JSONDecodeError:
+                        envelope = {}
+                    calls = envelope.get("calls") if isinstance(envelope.get("calls"), list) else []
+                    slots = []
+                    for i, c in enumerate(calls):
+                        if not isinstance(c, dict):
+                            continue
+                        slots.append(
+                            {
+                                "slot_index": i,
+                                "human_decision": None,
+                                "tool_name": str(c.get("tool_name") or ""),
+                                "arguments": c.get("arguments")
+                                if isinstance(c.get("arguments"), dict)
+                                else {},
+                                "endpoint": str(c.get("endpoint") or ""),
+                                "description": str(c.get("description") or ""),
+                            },
+                        )
+                    batch_auto = auto_accept_tools or _agent_chat_all_slots_skip_approval_prompt(slots)
+                    if batch_auto and slots:
+                        approve_slots = [{**s, "human_decision": "approve"} for s in slots]
+                        carry_pre = "".join(thinking_chunks).strip() or None
+                        thinking_chunks.clear()
+                        async for line in execute_tool_slots_follow_up(
+                            settings,
+                            db,
+                            organization_id=organization_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            snapshot=list(llm_messages),
+                            slots=approve_slots,
+                            tenant_roles=roles,
+                            batch_message_id=None,
+                            carry_thinking=carry_pre,
+                            tool_schemas=tool_schemas,
+                            auto_accept_tools=auto_accept_tools,
+                        ):
+                            yield line
+                        skip_outer_yield = True
+                    else:
+                        skip_outer_yield = False
+
+                elif payload.startswith("[TOOL_CALL_PENDING]"):
+                    await _persist_partial_before_tool()
+                    rest = payload[len("[TOOL_CALL_PENDING]") :].strip()
+                    try:
+                        pending_data = json.loads(rest)
+                    except json.JSONDecodeError:
+                        pending_data = {}
+                    tool_name = str(pending_data.get("tool_name") or "")
+                    args = (
+                        pending_data.get("arguments")
+                        if isinstance(pending_data.get("arguments"), dict)
+                        else {}
+                    )
+                    endpoint = str(pending_data.get("endpoint") or "")
+                    desc = str(pending_data.get("description") or "")
+                    single_auto = auto_accept_tools or _agent_chat_skip_tool_approval_prompt(tool_name)
+                    if single_auto and tool_name.strip():
+                        carry_pre = "".join(thinking_chunks).strip() or None
+                        thinking_chunks.clear()
+                        async for line in _auto_execute_single_tool_sse(
+                            settings,
+                            db,
+                            organization_id=organization_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            snapshot=list(llm_messages),
+                            tool_name=tool_name,
+                            args=args,
+                            endpoint=endpoint,
+                            tenant_roles=roles,
+                            carry_thinking=carry_pre,
+                            follow_tool_schemas=tool_schemas,
+                            auto_accept_tools=auto_accept_tools,
+                        ):
+                            yield line
+                        skip_outer_yield = True
+                    else:
+                        intent_text = (
+                            f"[Tool call requested: **{tool_name}**]\n"
+                            f"Arguments: `{json.dumps(args, indent=2)}`"
+                        )
+                        tc_state = {
+                            "state": "pending",
+                            "tool_name": tool_name,
+                            "arguments": args,
+                            "endpoint": endpoint,
+                            "description": desc,
+                        }
+                        mid = await insert_message(
+                            db,
+                            organization_id=organization_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role="assistant",
+                            content=intent_text,
+                            tool_call=tc_state,
+                            llm_messages_snapshot=list(llm_messages),
+                            thinking_content="".join(thinking_chunks) or None,
+                            routing=routing,
+                            llm_tool_schemas=tool_schemas,
+                        )
+                        thinking_chunks.clear()
+                        pending_data["assistant_message_id"] = str(mid)
+                        raw_event = f"data: [TOOL_CALL_PENDING] {json.dumps(pending_data)}"
+
                 if payload == "[DONE]":
                     seen_done = True
                     full_text = "".join(assistant_chunks).strip()
@@ -2461,7 +2611,8 @@ async def stream_follow_up_after_tool(
                             assistant_chunks.append(tok)
                     except json.JSONDecodeError:
                         pass
-                yield raw_event + "\n\n"
+                if not skip_outer_yield:
+                    yield raw_event + "\n\n"
 
         if buffer.strip():
             yield buffer if buffer.endswith("\n\n") else buffer + "\n\n"
