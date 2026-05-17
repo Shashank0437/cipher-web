@@ -958,6 +958,12 @@ async def get_message_owned(
     )
 
 
+def tool_result_llm_message(content: str, tool_name: str = "") -> dict[str, Any]:
+    """OpenAI-compatible tool result for follow-up LLM turns (requires ``name`` or ``tool_call_id``)."""
+    tn = (tool_name or "").strip() or "tool"
+    return {"role": "tool", "content": content, "name": tn}
+
+
 def build_llm_messages_from_history(
     settings: Settings,
     rows: list[dict[str, Any]],
@@ -983,7 +989,12 @@ def build_llm_messages_from_history(
         content = str(row.get("content") or "")
         if role not in ("user", "assistant", "tool"):
             role = "user"
-        messages.append({"role": role, "content": content})
+        entry: dict[str, Any] = {"role": role, "content": content}
+        if role == "tool":
+            tn = str(row.get("tool_name") or row.get("name") or "").strip()
+            if tn:
+                entry["name"] = tn
+        messages.append(entry)
     return messages
 
 
@@ -2147,7 +2158,7 @@ async def execute_tool_slots_follow_up(
                 role="tool",
                 content=skip_txt,
             )
-            follow_tool_msgs.append({"role": "tool", "content": skip_txt})
+            follow_tool_msgs.append(tool_result_llm_message(skip_txt, tn))
             updated_slots.append({**cur, "execution_outcome": "rejected"})
             continue
 
@@ -2169,7 +2180,7 @@ async def execute_tool_slots_follow_up(
                 role="tool",
                 content=err_txt,
             )
-            follow_tool_msgs.append({"role": "tool", "content": err_txt})
+            follow_tool_msgs.append(tool_result_llm_message(err_txt, tn))
             updated_slots.append({**cur, "execution_outcome": "blocked"})
             continue
 
@@ -2199,7 +2210,7 @@ async def execute_tool_slots_follow_up(
             role="tool",
             content=result_text,
         )
-        follow_tool_msgs.append({"role": "tool", "content": result_text})
+        follow_tool_msgs.append(tool_result_llm_message(result_text, tn))
         eo = (
             "error"
             if str(cur.get("run_status") or "") == "error"
@@ -2273,7 +2284,7 @@ async def _auto_execute_single_tool_sse(
             role="tool",
             content=err_txt,
         )
-        follow_llm = list(snapshot) + [{"role": "tool", "content": err_txt}]
+        follow_llm = list(snapshot) + [tool_result_llm_message(err_txt, tool_name)]
         async for chunk in stream_follow_up_after_tool(
             settings,
             db,
@@ -2325,7 +2336,7 @@ async def _auto_execute_single_tool_sse(
         content=result_text,
     )
 
-    follow_msgs = list(snapshot) + [{"role": "tool", "content": result_text}]
+    follow_msgs = list(snapshot) + [tool_result_llm_message(result_text, tool_name)]
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,

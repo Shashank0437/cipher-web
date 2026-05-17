@@ -54,6 +54,7 @@ from app.services.agent_chat import (
     stream_cipherstrike_turn,
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
+    tool_result_llm_message,
     touch_session_ui_context,
     _run_one_tool_detailed,
     _slot_progress_payload,
@@ -549,7 +550,7 @@ async def tool_confirm_stream(
                     {"_id": aid},
                     {"$set": {"tool_call.state": "rejected"}},
                 )
-                follow_msgs = list(snapshot) + [{"role": "tool", "content": cancel}]
+                follow_msgs = list(snapshot) + [tool_result_llm_message(cancel, tool_name)]
                 async for chunk in stream_follow_up_after_tool(
                     settings,
                     db,
@@ -726,7 +727,7 @@ async def tool_confirm_stream(
             )
             await _sse_flush_tick()
 
-            follow_msgs = list(snapshot) + [{"role": "tool", "content": result_text}]
+            follow_msgs = list(snapshot) + [tool_result_llm_message(result_text, tool_name)]
             async for chunk in stream_follow_up_after_tool(
                 settings,
                 db,
