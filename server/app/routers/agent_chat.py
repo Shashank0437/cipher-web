@@ -32,6 +32,7 @@ from app.schemas.agent_chat import (
 from app.services.agent_chat import (
     TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
+    _EXPLICIT_RUN_TOOL_RE,
     _agent_chat_skip_tool_approval_prompt,
     _looks_like_contextual_tool_follow_up,
     infer_retry_rejected_tool_names,
@@ -403,6 +404,7 @@ async def post_message_stream(
                 rt.intent == "conversational"
                 and (rt.router_reply or "").strip()
                 and not _looks_like_contextual_tool_follow_up(user_msg, rows)
+                and not _EXPLICIT_RUN_TOOL_RE.search(user_msg)
             ):
                 text = rt.router_reply.strip()
                 step = 72
@@ -422,7 +424,7 @@ async def post_message_stream(
                 yield "data: [DONE]\n\n"
                 return
 
-            tool_schemas = rt.schemas if rt.intent == "operational" else None
+            tool_schemas = rt.schemas if (rt.intent == "operational" or rt.schemas) else None
             tenant_roles = list(user.get("roles") or [])
             auto_accept = body.tool_execution_mode == "auto_accept"
             async for chunk in stream_cipherstrike_turn(

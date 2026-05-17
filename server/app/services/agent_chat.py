@@ -1474,10 +1474,16 @@ async def maybe_upgrade_router_result_for_llm(
     if _looks_like_tool_pick_question(user_message):
         return rt
     explicit = bool(explicit_tool_names)
+    is_explicit_run = bool(_EXPLICIT_RUN_TOOL_RE.search(user_message))
+    is_contextual_follow_up = _looks_like_contextual_tool_follow_up(user_message, rows)
     conv_gap = (
         rt.intent == "conversational"
-        and not (rt.router_reply or "").strip()
-        and (explicit or _looks_like_contextual_tool_follow_up(user_message, rows) or session_suggests_security_follow_up(rows))
+        and (
+            not (rt.router_reply or "").strip()
+            or is_explicit_run
+            or is_contextual_follow_up
+        )
+        and (explicit or is_explicit_run or is_contextual_follow_up or session_suggests_security_follow_up(rows))
     )
     op_no_schema = rt.intent == "operational" and not rt.schemas
     if not (conv_gap or op_no_schema):
