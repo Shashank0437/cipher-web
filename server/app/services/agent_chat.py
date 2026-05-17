@@ -2460,6 +2460,7 @@ async def _auto_execute_single_tool_sse(
             session_id=session_id,
             role="tool",
             content=err_txt,
+            tool_name=tool_name,
         )
         follow_llm = list(snapshot) + [tool_result_llm_message(err_txt, tool_name)]
         async for chunk in stream_follow_up_after_tool(
@@ -2511,6 +2512,7 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         role="tool",
         content=result_text,
+        tool_name=tool_name,
     )
 
     follow_msgs = list(snapshot) + [tool_result_llm_message(result_text, tool_name)]
@@ -2616,6 +2618,7 @@ async def stream_follow_up_after_tool(
         thinking_chunks.append(str(carry_thinking).strip())
     buffer = ""
     seen_done = False
+    tool_pending_persisted = False
 
     async def _persist_partial_before_tool() -> None:
         full_text = "".join(assistant_chunks).strip()
@@ -2767,24 +2770,27 @@ async def stream_follow_up_after_tool(
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
                         )
+                        tool_pending_persisted = True
                         thinking_chunks.clear()
+                        assistant_chunks.clear()
                         pending_data["assistant_message_id"] = str(mid)
                         raw_event = f"data: [TOOL_CALL_PENDING] {json.dumps(pending_data)}"
 
                 if payload == "[DONE]":
                     seen_done = True
-                    full_text = "".join(assistant_chunks).strip()
-                    think_txt = "".join(thinking_chunks) or None
-                    if full_text or think_txt:
-                        await insert_message(
-                            db,
-                            organization_id=organization_id,
-                            user_id=user_id,
-                            session_id=session_id,
-                            role="assistant",
-                            content=full_text,
-                            thinking_content=think_txt,
-                        )
+                    if not tool_pending_persisted:
+                        full_text = "".join(assistant_chunks).strip()
+                        think_txt = "".join(thinking_chunks) or None
+                        if full_text or think_txt:
+                            await insert_message(
+                                db,
+                                organization_id=organization_id,
+                                user_id=user_id,
+                                session_id=session_id,
+                                role="assistant",
+                                content=full_text,
+                                thinking_content=think_txt,
+                            )
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
                     err_txt = payload[7:].lstrip()
@@ -2816,18 +2822,19 @@ async def stream_follow_up_after_tool(
             yield buffer if buffer.endswith("\n\n") else buffer + "\n\n"
 
         if not seen_done and (assistant_chunks or thinking_chunks):
-            full_text = "".join(assistant_chunks).strip()
-            think_txt = "".join(thinking_chunks) or None
-            if full_text or think_txt:
-                await insert_message(
-                    db,
-                    organization_id=organization_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    role="assistant",
-                    content=full_text,
-                    thinking_content=think_txt,
-                )
+            if not tool_pending_persisted:
+                full_text = "".join(assistant_chunks).strip()
+                think_txt = "".join(thinking_chunks) or None
+                if full_text or think_txt:
+                    await insert_message(
+                        db,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        role="assistant",
+                        content=full_text,
+                        thinking_content=think_txt,
+                    )
             yield "data: [DONE]\n\n"
         elif not seen_done:
             # Agent closed the stream without a terminal marker (misbehaving proxy, partial
