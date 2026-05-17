@@ -1471,11 +1471,8 @@ async def maybe_upgrade_router_result_for_llm(
     explicit = bool(explicit_tool_names)
     conv_gap = (
         rt.intent == "conversational"
-        and (
-            not (rt.router_reply or "").strip()
-            or _looks_like_contextual_tool_follow_up(user_message, rows)
-        )
-        and (explicit or session_suggests_security_follow_up(rows))
+        and not (rt.router_reply or "").strip()
+        and (explicit or _looks_like_contextual_tool_follow_up(user_message, rows) or session_suggests_security_follow_up(rows))
     )
     op_no_schema = rt.intent == "operational" and not rt.schemas
     if not (conv_gap or op_no_schema):
