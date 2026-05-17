@@ -707,6 +707,8 @@ def _augment_router_user_message(rows: list[dict[str, Any]], current: str, *, ma
         t = str(m.get("content") or "").strip()
         if not t or t in seen:
             continue
+        if role == "assistant" and ("[Tool " in t or "[TOOL_" in t or "Tool batch pending" in t):
+            continue
         seen.add(t)
         label = "User" if role == "user" else "Assistant"
         parts.append(f"[{label}]\n{t}")
@@ -1006,6 +1008,7 @@ async def insert_message(
     routing: dict[str, Any] | None = None,
     llm_tool_schemas: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    tool_name: str | None = None,
 ) -> ObjectId:
     doc: dict[str, Any] = {
         "organization_id": organization_id,
@@ -1016,6 +1019,8 @@ async def insert_message(
         "created_at": _utc_now(),
     }
     doc.update(_routing_insert_fragment(routing))
+    if tool_name:
+        doc["tool_name"] = tool_name
     if tool_call is not None:
         doc["tool_call"] = tool_call
     if tool_calls is not None:
@@ -2320,6 +2325,7 @@ async def execute_tool_slots_follow_up(
                 session_id=session_id,
                 role="tool",
                 content=skip_txt,
+                tool_name=tn,
             )
             follow_tool_msgs.append(tool_result_llm_message(skip_txt, tn))
             updated_slots.append({**cur, "execution_outcome": "rejected"})
@@ -2342,6 +2348,7 @@ async def execute_tool_slots_follow_up(
                 session_id=session_id,
                 role="tool",
                 content=err_txt,
+                tool_name=tn,
             )
             follow_tool_msgs.append(tool_result_llm_message(err_txt, tn))
             updated_slots.append({**cur, "execution_outcome": "blocked"})
@@ -2372,6 +2379,7 @@ async def execute_tool_slots_follow_up(
             session_id=session_id,
             role="tool",
             content=result_text,
+            tool_name=tn,
         )
         follow_tool_msgs.append(tool_result_llm_message(result_text, tn))
         eo = (
@@ -2587,6 +2595,8 @@ async def stream_follow_up_after_tool(
     tenant_roles: list[str] | None = None,
     auto_accept_tools: bool = False,
     routing: dict[str, Any] | None = None,
+    batch_only_tool_names: frozenset[str] | None = None,
+    batch_exclude_tool_names: frozenset[str] | None = None,
 ) -> AsyncIterator[str]:
     """Post-tool LLM stream; handles further tool calls like the primary agent stream."""
     roles = list(tenant_roles or [])
@@ -2642,6 +2652,14 @@ async def stream_follow_up_after_tool(
                     except json.JSONDecodeError:
                         envelope = {}
                     calls = envelope.get("calls") if isinstance(envelope.get("calls"), list) else []
+                    calls = filter_tool_batch_calls(
+                        calls,
+                        only_tool_names=batch_only_tool_names,
+                        exclude_tool_names=batch_exclude_tool_names,
+                    )
+                    if not calls:
+                        skip_outer_yield = True
+                        continue
                     slots = []
                     for i, c in enumerate(calls):
                         if not isinstance(c, dict):
