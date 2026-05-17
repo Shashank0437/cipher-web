@@ -525,9 +525,23 @@ _OPERATIONAL_SECURITY_HINTS = (
 
 _CONTEXTUAL_TOOL_FOLLOW_UP_RE = re.compile(
     r"\b(both|them|those|these|the two|two tools|use both|run both|do both|yes|yep|yeah|"
-    r"okay|ok|sure|go ahead|please do|run them|use them)\b",
+    r"okay|ok|sure|go ahead|please do|run them|use them|those tools|use those|run those|"
+    r"fine use|proceed|go for it|do it)\b",
     re.IGNORECASE,
 )
+
+_TOOL_PICK_QUESTION_RE = re.compile(
+    r"\b(which|what)\s+(tool|tools)\b|\b(tool|tools)\s+(should|can|do|would)\s+i\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_RUN_TOOL_RE = re.compile(
+    r"\b(run|execute|launch|start)\s+(the\s+)?(scan|tool|test|pentest|nikto|nuclei|nmap|httpx)\b|"
+    r"\b(scan|pentest)\s+(this|the|that)\b|"
+    r"\b(use|run)\s+(nmap|nikto|nuclei|httpx|subfinder|amass|ffuf|gobuster|sqlmap)\b",
+    re.IGNORECASE,
+)
+_SKIPPED_TOOL_RE = re.compile(r"\[Skipped \*\*([^*]+)\*\* — operator rejected\]", re.IGNORECASE)
+_EXECUTED_TOOL_RE = re.compile(r"\[Tool executed: \*\*([^*]+)\*\*\]", re.IGNORECASE)
 
 _FALLBACK_SECURITY_TOOLS_ORDER = (
     "httpx",
@@ -573,15 +587,92 @@ def _looks_like_short_tool_approval(message: str) -> bool:
 def _looks_like_contextual_tool_follow_up(message: str, rows: list[dict[str, Any]]) -> bool:
     """Short affirmations (e.g. "ok use both") after a security turn — need assistant context for routing."""
     lower = message.lower().strip()
-    if len(lower) > 64:
+    if len(lower) > 80:
         return False
     if not _CONTEXTUAL_TOOL_FOLLOW_UP_RE.search(lower):
         return False
     return session_suggests_security_follow_up(rows, tail=12)
 
 
+def _looks_like_tool_pick_question(message: str) -> bool:
+    """Advisory 'which tool' asks — recommend tools in prose, do not auto-launch a full batch."""
+    if not _TOOL_PICK_QUESTION_RE.search(message):
+        return False
+    return not _EXPLICIT_RUN_TOOL_RE.search(message)
+
+
+def _session_tool_outcomes(rows: list[dict[str, Any]], *, tail: int = 32) -> tuple[set[str], set[str]]:
+    rejected: set[str] = set()
+    completed: set[str] = set()
+    for m in rows[-tail:]:
+        content = str(m.get("content") or "")
+        for match in _SKIPPED_TOOL_RE.finditer(content):
+            rejected.add(match.group(1).strip().lower())
+        for match in _EXECUTED_TOOL_RE.finditer(content):
+            completed.add(match.group(1).strip().lower())
+        slots = m.get("tool_calls")
+        if isinstance(slots, list):
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    continue
+                tn = str(slot.get("tool_name") or "").strip().lower()
+                if not tn:
+                    continue
+                eo = str(slot.get("execution_outcome") or "").lower()
+                hd = str(slot.get("human_decision") or "").lower()
+                if eo == "rejected" or hd == "reject":
+                    rejected.add(tn)
+                elif eo in ("done", "completed", "success"):
+                    completed.add(tn)
+    completed -= rejected
+    return rejected, completed
+
+
+def infer_retry_rejected_tool_names(rows: list[dict[str, Any]]) -> list[str]:
+    """Tools the operator rejected in this session and has not successfully run since."""
+    rejected, completed = _session_tool_outcomes(rows)
+    pending = sorted(rejected - completed)
+    return pending
+
+
+def looks_like_retry_rejected_tools(message: str, rows: list[dict[str, Any]]) -> bool:
+    if not _looks_like_contextual_tool_follow_up(message, rows):
+        return False
+    return bool(infer_retry_rejected_tool_names(rows))
+
+
+def retry_rejected_tools_system_note(tool_names: list[str]) -> str:
+    joined = ", ".join(tool_names)
+    return (
+        "Operator follow-up: run only the tools they previously rejected in approval "
+        f"({joined}). Do not re-run tools that already completed in this session. "
+        "Call only those tool functions with the same target as before."
+    )
+
+
+def filter_tool_batch_calls(
+    calls: list[dict[str, Any]],
+    *,
+    only_tool_names: frozenset[str] | None = None,
+    exclude_tool_names: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for c in calls:
+        if not isinstance(c, dict):
+            continue
+        tn = str(c.get("tool_name") or "").strip().lower()
+        if only_tool_names is not None and tn not in only_tool_names:
+            continue
+        if exclude_tool_names and tn in exclude_tool_names:
+            continue
+        out.append(c)
+    return out
+
+
 def _is_conversational(message: str) -> bool:
     lower = message.lower().strip()
+    if _looks_like_tool_pick_question(message):
+        return True
     if _looks_operational_security(lower):
         return False
     if _looks_like_short_tool_approval(message):
@@ -1217,6 +1308,39 @@ async def plan_router_turn(
         if len(explicit) >= max_pick:
             break
 
+    if not explicit and _looks_like_tool_pick_question(user_message):
+        meta_pick: dict[str, Any] = {"intent_override": "tool_pick_question"}
+        ctx_pick = await _load_chat_tool_maps(settings, db, organization_id=organization_id)
+        if ctx_pick is None:
+            return RouterTurnResult("conversational", None, None, {**meta_pick, "error": "Agent catalog unreachable"})
+        _by_pick, router_catalog_pick = ctx_pick
+        meta_pick.update(await _fetch_keyword_category_hint(settings, user_message))
+        try:
+            raw_pick = await agent_post_json(
+                settings,
+                "api/cipherstrike/route-intent",
+                {
+                    "message": user_message.strip(),
+                    "tools": router_catalog_pick,
+                    "max_tool_names": settings.agent_router_max_tools,
+                },
+                timeout_seconds=settings.agent_route_intent_timeout_seconds,
+            )
+        except AgentUnreachableError as e:
+            return RouterTurnResult("conversational", None, None, {**meta_pick, "route_intent_error": e.message})
+        meta_pick["route_intent"] = raw_pick
+        reply_pick = ""
+        if raw_pick.get("success"):
+            reply_pick = str(raw_pick.get("reply") or "").strip()
+            names_pick = raw_pick.get("tool_names") or []
+            if not reply_pick and isinstance(names_pick, list) and names_pick:
+                reply_pick = (
+                    "For web server vulnerability testing on that target, common choices are: "
+                    + ", ".join(str(n) for n in names_pick[:8] if isinstance(n, str) and str(n).strip())
+                    + ". Say which to run (or approve a batch) when you are ready to execute."
+                )
+        return RouterTurnResult("conversational", None, reply_pick or None, meta_pick)
+
     if not explicit and _is_conversational(user_message):
         return RouterTurnResult("conversational", None, None, {"skipped": True, "reason": "conversational_heuristic"})
 
@@ -1342,6 +1466,8 @@ async def maybe_upgrade_router_result_for_llm(
     rt: RouterTurnResult,
 ) -> RouterTurnResult:
     """Re-route or attach fallback schemas when the first router pass would stream the LLM without tool schemas."""
+    if _looks_like_tool_pick_question(user_message):
+        return rt
     explicit = bool(explicit_tool_names)
     conv_gap = (
         rt.intent == "conversational"
@@ -1410,6 +1536,8 @@ async def stream_cipherstrike_turn(
     tenant_roles: list[str] | None = None,
     auto_accept_tools: bool = False,
     routing: dict[str, Any] | None = None,
+    batch_only_tool_names: frozenset[str] | None = None,
+    batch_exclude_tool_names: frozenset[str] | None = None,
 ) -> AsyncIterator[str]:
     """
     Forward SSE from NyxStrike cipherstrike bridge and persist assistant message on completion.
@@ -1435,6 +1563,7 @@ async def stream_cipherstrike_turn(
         body["schemas"] = tool_schemas
 
     buffer = ""
+    tool_pending_persisted = False
     try:
         async for text_chunk in agent_post_sse_stream(settings, path, body, timeout_seconds=timeout):
             buffer += text_chunk
@@ -1454,11 +1583,14 @@ async def stream_cipherstrike_turn(
                     except json.JSONDecodeError:
                         envelope = {}
                     calls = envelope.get("calls") if isinstance(envelope.get("calls"), list) else []
+                    calls = filter_tool_batch_calls(
+                        calls,
+                        only_tool_names=batch_only_tool_names,
+                        exclude_tool_names=batch_exclude_tool_names,
+                    )
                     slots = []
                     lines: list[str] = []
                     for i, c in enumerate(calls):
-                        if not isinstance(c, dict):
-                            continue
                         tn = str(c.get("tool_name") or "")
                         args = c.get("arguments") if isinstance(c.get("arguments"), dict) else {}
                         endpoint = str(c.get("endpoint") or "")
@@ -1474,6 +1606,9 @@ async def stream_cipherstrike_turn(
                             },
                         )
                         lines.append(f"- **{tn}** — `{json.dumps(args)}`")
+                    if not slots:
+                        skip_outer_yield = True
+                        continue
                     batch_auto = auto_accept_tools or _agent_chat_all_slots_skip_approval_prompt(slots)
                     if batch_auto and slots:
                         approve_slots = [{**s, "human_decision": "approve"} for s in slots]
@@ -1514,7 +1649,9 @@ async def stream_cipherstrike_turn(
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
                         )
+                        tool_pending_persisted = True
                         thinking_chunks.clear()
+                        assistant_chunks.clear()
                         out_payload = {"assistant_message_id": str(mid), "calls": calls}
                         block_to_yield = f"data: [TOOL_CALL_BATCH_PENDING] {json.dumps(out_payload)}\n"
 
@@ -1574,25 +1711,28 @@ async def stream_cipherstrike_turn(
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
                         )
+                        tool_pending_persisted = True
                         thinking_chunks.clear()
+                        assistant_chunks.clear()
                         pending_data["assistant_message_id"] = str(mid)
                         block_to_yield = f"data: [TOOL_CALL_PENDING] {json.dumps(pending_data)}\n"
 
                 elif payload == "[DONE]":
                     seen_done = True
-                    full_text = "".join(assistant_chunks).strip()
-                    think_txt = "".join(thinking_chunks) or None
-                    if full_text or think_txt:
-                        await insert_message(
-                            db,
-                            organization_id=organization_id,
-                            user_id=user_id,
-                            session_id=session_id,
-                            role="assistant",
-                            content=full_text,
-                            thinking_content=think_txt,
-                            routing=routing,
-                        )
+                    if not tool_pending_persisted:
+                        full_text = "".join(assistant_chunks).strip()
+                        think_txt = "".join(thinking_chunks) or None
+                        if full_text or think_txt:
+                            await insert_message(
+                                db,
+                                organization_id=organization_id,
+                                user_id=user_id,
+                                session_id=session_id,
+                                role="assistant",
+                                content=full_text,
+                                thinking_content=think_txt,
+                                routing=routing,
+                            )
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
                     err_txt = payload[7:].lstrip()

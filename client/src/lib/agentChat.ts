@@ -83,6 +83,44 @@ export type AgentChatContextPayload = {
   session_id?: string;
 };
 
+/** Build a pending batch row from SSE `[TOOL_CALL_BATCH_PENDING]` before GET /messages refresh. */
+export function agentChatMessageFromBatchPendingPayload(
+  payload: Record<string, unknown>,
+  routing?: Pick<AgentChatMessage, "router_category" | "keyword_category" | "keyword_confidence">,
+): AgentChatMessage | null {
+  const mid = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id.trim() : "";
+  const rawCalls = payload.calls;
+  if (!mid || !Array.isArray(rawCalls) || rawCalls.length === 0) return null;
+  const slots: AgentChatBatchSlot[] = rawCalls.map((c, i) => {
+    const row = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
+    return {
+      slot_index: i,
+      human_decision: null,
+      tool_name: String(row.tool_name ?? ""),
+      arguments:
+        row.arguments && typeof row.arguments === "object"
+          ? (row.arguments as Record<string, unknown>)
+          : {},
+      endpoint: String(row.endpoint ?? ""),
+      description: String(row.description ?? ""),
+    };
+  });
+  const lines = slots.map((s) => `- **${s.tool_name}** — \`${JSON.stringify(s.arguments ?? {})}\``);
+  return {
+    id: mid,
+    role: "assistant",
+    content:
+      "Tool batch pending human approval (all slots must be approve/reject before execution):\n" +
+      lines.join("\n"),
+    created_at: new Date().toISOString(),
+    tool_calls: slots,
+    batch_execution_state: "awaiting_quorum",
+    router_category: routing?.router_category ?? null,
+    keyword_category: routing?.keyword_category ?? null,
+    keyword_confidence: routing?.keyword_confidence ?? null,
+  };
+}
+
 export type AgentChatToolBatchSlotProgressPayload = {
   message_id?: string;
   slot_index?: number;

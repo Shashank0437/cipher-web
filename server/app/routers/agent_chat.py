@@ -34,6 +34,10 @@ from app.services.agent_chat import (
     RouterTurnResult,
     _agent_chat_skip_tool_approval_prompt,
     _looks_like_contextual_tool_follow_up,
+    infer_retry_rejected_tool_names,
+    looks_like_retry_rejected_tools,
+    retry_rejected_tools_system_note,
+    _session_tool_outcomes,
     attachments_from_tool_result_json,
     build_llm_messages_from_history,
     context_snippet,
@@ -346,20 +350,40 @@ async def post_message_stream(
             summary_str = str(summary_raw or "").strip() or None
 
             ctx = body.context.model_dump() if body.context else None
+            user_msg = body.message.strip()
+            explicit_for_turn = list(explicit_tools)
+            retry_rejected = (
+                infer_retry_rejected_tool_names(rows)
+                if looks_like_retry_rejected_tools(user_msg, rows)
+                else []
+            )
+            for tn in retry_rejected:
+                if tn not in explicit_for_turn:
+                    explicit_for_turn.append(tn)
+            _, completed_tools = _session_tool_outcomes(rows)
+            batch_exclude = frozenset(completed_tools) if completed_tools else None
+            batch_only = frozenset(tn.lower() for tn in retry_rejected) if retry_rejected else None
+            extra_system_parts: list[str] = []
+            ctx_snip = context_snippet(ctx)
+            if ctx_snip:
+                extra_system_parts.append(ctx_snip)
+            if retry_rejected:
+                extra_system_parts.append(retry_rejected_tools_system_note(retry_rejected))
             llm_messages = build_llm_messages_from_history(
                 settings,
                 rows,
-                extra_system=context_snippet(ctx),
+                extra_system="\n\n".join(extra_system_parts) if extra_system_parts else None,
                 conversation_summary=summary_str,
             )
 
+            explicit_arg = explicit_for_turn if explicit_for_turn else None
             try:
                 rt = await plan_router_turn(
                     settings,
                     db,
                     organization_id=user["organization_id"],
-                    user_message=body.message.strip(),
-                    explicit_tool_names=explicit_tools if explicit_tools else None,
+                    user_message=user_msg,
+                    explicit_tool_names=explicit_arg,
                 )
             except Exception:
                 logger.exception("plan_router_turn")
@@ -370,15 +394,15 @@ async def post_message_stream(
                 db,
                 organization_id=user["organization_id"],
                 rows=rows,
-                user_message=body.message.strip(),
-                explicit_tool_names=explicit_tools if explicit_tools else None,
+                user_message=user_msg,
+                explicit_tool_names=explicit_arg,
                 rt=rt,
             )
 
             if (
                 rt.intent == "conversational"
                 and (rt.router_reply or "").strip()
-                and not _looks_like_contextual_tool_follow_up(body.message.strip(), rows)
+                and not _looks_like_contextual_tool_follow_up(user_msg, rows)
             ):
                 text = rt.router_reply.strip()
                 step = 72
@@ -412,6 +436,8 @@ async def post_message_stream(
                 tenant_roles=tenant_roles,
                 auto_accept_tools=auto_accept,
                 routing=routing_hints_from_plan_meta(rt.meta),
+                batch_only_tool_names=batch_only,
+                batch_exclude_tool_names=batch_exclude,
             ):
                 yield chunk
         except AgentUnreachableError as e:

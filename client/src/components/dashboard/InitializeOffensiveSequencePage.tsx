@@ -17,6 +17,7 @@ import {
   listAgentChatMessages,
   listAgentChatSessions,
   patchAgentChatToolBatchDecisions,
+  agentChatMessageFromBatchPendingPayload,
   type AgentChatBatchSlot,
   type AgentChatMessage,
   type AgentChatSession,
@@ -909,6 +910,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         captureThoughtDuration();
         flushAllStreamPreview();
         clearLiveStreamState();
+        const optimisticBatch = agentChatMessageFromBatchPendingPayload(ev.payload);
+        if (optimisticBatch) {
+          setMessages((prev) => {
+            const rest = prev.filter((m) => m.id !== optimisticBatch.id);
+            return [...rest, optimisticBatch];
+          });
+        }
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
@@ -1451,6 +1459,25 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                               {a.filename || "Download PDF"}
                             </button>
                           ))}
+                        </div>
+                      ) : null}
+                      {m.role === "assistant" &&
+                      m.content.includes("Tool batch pending") &&
+                      !batchPanelOpen(m) ? (
+                        <div className="rounded-xl border border-error/35 bg-error/8 px-3 py-2 text-[12px] text-on-surface">
+                          <p className="text-error">
+                            Approve / reject controls did not load for this batch (missing tool metadata). Try
+                            refreshing messages.
+                          </p>
+                          {selectedSessionId ? (
+                            <button
+                              type="button"
+                              className="mt-2 rounded-lg border border-outline-variant bg-surface-container-high px-3 py-1 text-[11px] font-semibold"
+                              onClick={() => void refreshMessages(selectedSessionId, { silent: true })}
+                            >
+                              Refresh thread
+                            </button>
+                          ) : null}
                         </div>
                       ) : null}
                       {m.role === "assistant" && batchPanelOpen(m)
