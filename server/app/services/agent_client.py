@@ -249,6 +249,9 @@ def forward_agent_internal_tool_run_sync(
     ep = normalize_agent_tool_path(catalog_path)
     url = urljoin(base, "api/internal/tool-run")
     body = {"path": ep, "json": payload if payload else {}, "stream_run_id": stream_run_id}
+    stream_redis_url = str(getattr(settings, "agent_tool_stream_redis_url", "") or "").strip()
+    if stream_redis_url:
+        body["redis_url"] = stream_redis_url
     try:
         with httpx.Client(timeout=timeout, headers=headers) as client:
             r = client.post(url, json=body)

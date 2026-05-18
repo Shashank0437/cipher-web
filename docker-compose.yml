@@ -49,6 +49,8 @@ services:
     environment:
       MONGODB_URI: mongodb://mongo:27017
       REDIS_URL: redis://redis:6379/0
+      # Agent runs on the host in this setup; pass the host-reachable Redis URL to /api/internal/tool-run.
+      AGENT_TOOL_STREAM_REDIS_URL: redis://127.0.0.1:6379/0
     depends_on:
       mongo:
         condition: service_healthy

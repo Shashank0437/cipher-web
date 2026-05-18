@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     # When True (default), chat tool execution uses Redis Streams for live stdout/stderr tails (requires Redis + agent support).
     agent_tool_log_streams_enabled: bool = Field(default=True)
+    # Redis URL as seen from the agent process. In docker-compose the API uses redis://redis:6379,
+    # while a host-running agent must publish to the host-mapped Redis port.
+    agent_tool_stream_redis_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("AGENT_TOOL_STREAM_REDIS_URL"),
+    )
 
     admin_api_key: str = ""  # required for /admin/* when set; if empty, admin routes reject
 
