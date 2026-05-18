@@ -1804,6 +1804,13 @@ async def stream_cipherstrike_turn(
                     endpoint = str(pending_data.get("endpoint") or "")
                     desc = str(pending_data.get("description") or "")
                     single_auto = auto_accept_tools or _agent_chat_skip_tool_approval_prompt(tool_name)
+                    logger.info(
+                        "stream_cipherstrike_turn: [TOOL_CALL_PENDING] tool=%r args_keys=%s endpoint=%r auto_accept=%s skip_prompt=%s -> %s_path",
+                        tool_name, list(args.keys()) if isinstance(args, dict) else None,
+                        endpoint, auto_accept_tools,
+                        _agent_chat_skip_tool_approval_prompt(tool_name),
+                        "auto_execute" if single_auto and tool_name.strip() else "manual_approval",
+                    )
                     if single_auto and tool_name.strip():
                         carry_pre_tool_thinking = "".join(thinking_chunks).strip() or None
                         thinking_chunks.clear()
@@ -1854,6 +1861,10 @@ async def stream_cipherstrike_turn(
                         assistant_chunks.clear()
                         pending_data["assistant_message_id"] = str(mid)
                         block_to_yield = f"data: [TOOL_CALL_PENDING] {json.dumps(pending_data)}\n"
+                        logger.info(
+                            "stream_cipherstrike_turn: persisted SINGLE pending message_id=%s tool=%r state=pending",
+                            str(mid), tool_name,
+                        )
 
                 elif payload == "[DONE]":
                     seen_done = True
