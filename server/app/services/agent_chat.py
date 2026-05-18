@@ -657,14 +657,27 @@ def filter_tool_batch_calls(
     exclude_tool_names: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for c in calls:
         if not isinstance(c, dict):
             continue
         tn = str(c.get("tool_name") or "").strip().lower()
+        if not tn:
+            continue
         if only_tool_names is not None and tn not in only_tool_names:
             continue
         if exclude_tool_names and tn in exclude_tool_names:
             continue
+        args = c.get("arguments") if isinstance(c.get("arguments"), dict) else {}
+        try:
+            args_key = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            args_key = str(args)
+        key = (tn, args_key)
+        if key in seen:
+            logger.warning("agent_chat: dropping duplicate batch tool call name=%r args=%s", tn, args_key)
+            continue
+        seen.add(key)
         out.append(c)
     return out
 

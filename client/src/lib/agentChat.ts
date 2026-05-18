@@ -99,20 +99,28 @@ export function agentChatMessageFromBatchPendingPayload(
   const mid = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id.trim() : "";
   const rawCalls = payload.calls;
   if (!mid || !Array.isArray(rawCalls) || rawCalls.length === 0) return null;
-  const slots: AgentChatBatchSlot[] = rawCalls.map((c, i) => {
+  const seen = new Set<string>();
+  const slots: AgentChatBatchSlot[] = [];
+  rawCalls.forEach((c) => {
     const row = c && typeof c === "object" ? (c as Record<string, unknown>) : {};
-    return {
-      slot_index: i,
+    const toolName = String(row.tool_name ?? "");
+    const args =
+      row.arguments && typeof row.arguments === "object"
+        ? (row.arguments as Record<string, unknown>)
+        : {};
+    const key = `${toolName.trim().toLowerCase()}:${JSON.stringify(args)}`;
+    if (!toolName.trim() || seen.has(key)) return;
+    seen.add(key);
+    slots.push({
+      slot_index: slots.length,
       human_decision: null,
-      tool_name: String(row.tool_name ?? ""),
-      arguments:
-        row.arguments && typeof row.arguments === "object"
-          ? (row.arguments as Record<string, unknown>)
-          : {},
+      tool_name: toolName,
+      arguments: args,
       endpoint: String(row.endpoint ?? ""),
       description: String(row.description ?? ""),
-    };
+    });
   });
+  if (slots.length === 0) return null;
   const lines = slots.map((s) => `- **${s.tool_name}** — \`${JSON.stringify(s.arguments ?? {})}\``);
   return {
     id: mid,
