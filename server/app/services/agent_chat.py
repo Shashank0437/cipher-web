@@ -1832,10 +1832,9 @@ async def stream_cipherstrike_turn(
                             yield line
                         skip_outer_yield = True
                     else:
-                        intent_text = (
-                            f"[Tool call requested: **{tool_name}**]\n"
-                            f"Arguments: `{json.dumps(args, indent=2)}`"
-                        )
+                        # Use a minimal content marker (not the imitable markdown format) so the
+                        # LLM doesn't learn to emit "[Tool call requested: ...]" as plain text.
+                        intent_text = f"_tool_call_pending:{tool_name}_"
                         tc_state = {
                             "state": "pending",
                             "tool_name": tool_name,
@@ -2998,10 +2997,8 @@ async def stream_follow_up_after_tool(
                             yield line
                         skip_outer_yield = True
                     else:
-                        intent_text = (
-                            f"[Tool call requested: **{tool_name}**]\n"
-                            f"Arguments: `{json.dumps(args, indent=2)}`"
-                        )
+                        # Minimal content (not imitable markdown) — same reason as primary stream.
+                        intent_text = f"_tool_call_pending:{tool_name}_"
                         tc_state = {
                             "state": "pending",
                             "tool_name": tool_name,

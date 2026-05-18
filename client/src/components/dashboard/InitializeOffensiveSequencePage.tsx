@@ -1438,7 +1438,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                         }
                       >
                         {m.role === "assistant" ? (
-                          <AgentChatMarkdown text={m.content} />
+                          // Hide the internal pending-marker content; the tool_call card below renders the request.
+                          /^_tool_call_pending:[^_]+_$/.test(m.content?.trim() ?? "") ? null : (
+                            <AgentChatMarkdown text={m.content} />
+                          )
                         ) : (
                           <p className="whitespace-pre-wrap break-words break-all">{m.content}</p>
                         )}
