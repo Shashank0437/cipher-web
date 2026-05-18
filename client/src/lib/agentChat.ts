@@ -66,6 +66,7 @@ export type AgentChatMessage = {
   role: string;
   content: string;
   created_at: string;
+  tool_name?: string | null;
   tool_call?: AgentChatToolCallState | null;
   tool_calls?: AgentChatBatchSlot[] | null;
   batch_execution_state?: string | null;

@@ -969,7 +969,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         const si = ev.payload.slot_index;
         if (!mid || typeof si !== "number") return;
         const payload = ev.payload as Record<string, unknown>;
-        const { message_id: _m, ...rest } = payload;
+        const rest = { ...payload };
+        delete rest.message_id;
         const key = `${mid}-${si}`;
         const rs = String(rest.run_status ?? "").toLowerCase();
         setLiveBatchSlotOverlay((prev) => ({
