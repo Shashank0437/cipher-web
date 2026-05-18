@@ -2932,25 +2932,34 @@ async def stream_follow_up_after_tool(
                     endpoint = str(pending_data.get("endpoint") or "")
                     desc = str(pending_data.get("description") or "")
                     _tn_lower = tool_name.strip().lower()
+                    # Diagnostic: surface what the follow-up actually sees so we can confirm
+                    # the suppression guards are reached.
+                    logger.info(
+                        "stream_follow_up_after_tool: pending event name=%r excluded_set=%s only_set=%s recent_runs=%s",
+                        tool_name,
+                        sorted(batch_exclude_tool_names) if batch_exclude_tool_names else None,
+                        sorted(batch_only_tool_names) if batch_only_tool_names else None,
+                        sorted(t for (t, _) in recent_tool_runs),
+                    )
                     # Suppress excluded / non-allowed / duplicate calls BEFORE persisting any
                     # partial assistant text — otherwise we leave a stale "(continuing…)" message.
                     if batch_exclude_tool_names and _tn_lower in batch_exclude_tool_names:
-                        logger.info(
-                            "stream_follow_up_after_tool: suppressing excluded tool call name=%r (operator previously rejected)",
-                            tool_name,
+                        logger.warning(
+                            "stream_follow_up_after_tool: SUPPRESSING excluded tool call name=%r args=%s (operator previously ran/rejected)",
+                            tool_name, args,
                         )
                         skip_outer_yield = True
                         continue
                     if batch_only_tool_names is not None and _tn_lower not in batch_only_tool_names:
-                        logger.info(
-                            "stream_follow_up_after_tool: suppressing non-allowed tool call name=%r",
+                        logger.warning(
+                            "stream_follow_up_after_tool: SUPPRESSING non-allowed tool call name=%r",
                             tool_name,
                         )
                         skip_outer_yield = True
                         continue
                     if _is_duplicate_tool_call(tool_name, args):
-                        logger.info(
-                            "stream_follow_up_after_tool: suppressing duplicate tool call name=%r (already ran in this chain)",
+                        logger.warning(
+                            "stream_follow_up_after_tool: SUPPRESSING duplicate tool call name=%r (already ran in this chain)",
                             tool_name,
                         )
                         skip_outer_yield = True
