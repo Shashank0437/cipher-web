@@ -231,6 +231,9 @@ function singleToolSlotFromMessage(m: AgentChatMessage): AgentChatBatchSlot {
     stderr_tail: tc?.stderr_tail ?? undefined,
     stdout_truncated: tc?.stdout_truncated,
     stderr_truncated: tc?.stderr_truncated,
+    execution_log_tail: tc?.execution_log_tail ?? undefined,
+    execution_log_truncated: tc?.execution_log_truncated,
+    progress_line: tc?.progress_line ?? undefined,
     exit_code: tc?.exit_code ?? undefined,
     http_status: tc?.http_status ?? undefined,
     run_started_at: tc?.run_started_at ?? undefined,
@@ -274,6 +277,12 @@ function BatchRunStatusChip({ batchState, slot }: { batchState: string; slot: Ag
 function BatchExecLogPanel({ slot }: { slot: AgentChatBatchSlot }) {
   const out = (slot.stdout_tail ?? "").trim();
   const err = (slot.stderr_tail ?? "").trim();
+  const combinedLog =
+    (slot.execution_log_tail ?? "").trim() ||
+    [out ? `STDOUT:\n${out}` : "", err ? `STDERR:\n${err}` : ""].filter(Boolean).join("\n\n");
+  const progress = (slot.progress_line ?? "").trim();
+  const runStatus = String(slot.run_status ?? "").toLowerCase();
+  const active = runStatus === "running" || runStatus === "queued";
   const meta: string[] = [];
   if (slot.http_status != null && Number.isFinite(Number(slot.http_status))) {
     meta.push(`HTTP ${slot.http_status}`);
@@ -285,16 +294,19 @@ function BatchExecLogPanel({ slot }: { slot: AgentChatBatchSlot }) {
   if (slot.run_started_at) times.push(`started ${slot.run_started_at}`);
   if (slot.run_finished_at) times.push(`finished ${slot.run_finished_at}`);
 
-  const hasBody = Boolean(out || err);
+  const hasBody = Boolean(combinedLog || progress);
   const hasMeta = meta.length > 0 || times.length > 0;
   if (!hasBody && !hasMeta) return null;
 
   return (
-    <details className="mt-1.5 overflow-hidden rounded-lg bg-surface-container-lowest/90 ring-1 ring-outline-variant/45">
+    <details
+      open={active || undefined}
+      className="mt-1.5 overflow-hidden rounded-lg bg-surface-container-lowest/90 ring-1 ring-outline-variant/45"
+    >
       <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-[10px] font-semibold text-primary [&::-webkit-details-marker]:hidden">
         <Terminal className="size-3.5 shrink-0 opacity-90" aria-hidden strokeWidth={2} />
         <span>Execution log</span>
-        {slot.stdout_truncated || slot.stderr_truncated ? (
+        {slot.execution_log_truncated || slot.stdout_truncated || slot.stderr_truncated ? (
           <span className="text-[9px] font-normal text-on-surface-variant">(truncated)</span>
         ) : null}
       </summary>
@@ -304,19 +316,21 @@ function BatchExecLogPanel({ slot }: { slot: AgentChatBatchSlot }) {
             {[...meta, ...times].join(" · ")}
           </p>
         ) : null}
-        {out ? (
+        {progress ? (
           <div>
-            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-on-surface-variant">stdout</p>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/[0.04] p-2 font-mono text-[10px] leading-snug text-on-surface dark:bg-white/[0.06]">
-              {slot.stdout_tail ?? ""}
+            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-primary">progress</p>
+            <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md bg-primary-container/35 p-2 font-mono text-[10px] leading-snug text-on-surface">
+              {progress}
             </pre>
           </div>
         ) : null}
-        {err ? (
+        {combinedLog ? (
           <div>
-            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-error">stderr</p>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-error/8 p-2 font-mono text-[10px] leading-snug text-on-surface">
-              {slot.stderr_tail ?? ""}
+            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-on-surface-variant">
+              last 50 lines
+            </p>
+            <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/[0.04] p-2 font-mono text-[10px] leading-snug text-on-surface dark:bg-white/[0.06]">
+              {combinedLog}
             </pre>
           </div>
         ) : null}

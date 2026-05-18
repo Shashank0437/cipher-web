@@ -734,6 +734,9 @@ async def tool_confirm_stream(
                         "tool_call.stderr_tail": None,
                         "tool_call.stdout_truncated": False,
                         "tool_call.stderr_truncated": False,
+                        "tool_call.execution_log_tail": None,
+                        "tool_call.execution_log_truncated": False,
+                        "tool_call.progress_line": None,
                         "tool_call.exit_code": None,
                         "tool_call.http_status": None,
                     },
@@ -757,6 +760,9 @@ async def tool_confirm_stream(
                     http_status=None,
                     started_at=started_iso,
                     finished_at=None,
+                    execution_log_tail=None,
+                    execution_log_truncated=False,
+                    progress_line=None,
                 ),
             )
             await _sse_flush_tick()
@@ -815,6 +821,9 @@ async def tool_confirm_stream(
                     "exit_code": None,
                     "http_status": None,
                     "run_finished_at": fin_iso,
+                    "execution_log_tail": f"ERROR: {exc}",
+                    "execution_log_truncated": False,
+                    "progress_line": None,
                 }
                 result_text = json.dumps({"error": str(exc)})
 
@@ -840,6 +849,9 @@ async def tool_confirm_stream(
                 "tool_call.stderr_tail": prog.get("stderr_tail"),
                 "tool_call.stdout_truncated": bool(prog.get("stdout_truncated")),
                 "tool_call.stderr_truncated": bool(prog.get("stderr_truncated")),
+                "tool_call.execution_log_tail": prog.get("execution_log_tail"),
+                "tool_call.execution_log_truncated": bool(prog.get("execution_log_truncated")),
+                "tool_call.progress_line": prog.get("progress_line"),
                 "tool_call.exit_code": prog.get("exit_code"),
                 "tool_call.http_status": prog.get("http_status"),
                 "tool_call.run_started_at": started_iso,
@@ -867,6 +879,9 @@ async def tool_confirm_stream(
                     http_status=prog.get("http_status"),
                     started_at=started_iso,
                     finished_at=finished_iso,
+                    execution_log_tail=prog.get("execution_log_tail"),
+                    execution_log_truncated=bool(prog.get("execution_log_truncated")),
+                    progress_line=prog.get("progress_line"),
                 ),
             )
             await _sse_flush_tick()

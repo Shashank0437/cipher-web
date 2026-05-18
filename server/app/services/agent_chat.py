@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -68,6 +69,7 @@ _SCANNER_PROGRESS_LINE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _MIDDLE_OMITTED = "\n… [middle omitted] …\n"
+_EXECUTION_LOG_TAIL_LINES = 50
 
 # Markdown fence for tool JSON in persisted assistant rows. Four backticks so payloads
 # containing "```" (e.g. nmap/http stdout inside JSON strings) cannot close the fence early.
@@ -234,6 +236,9 @@ def _slot_progress_payload(
     http_status: int | None,
     started_at: str | None,
     finished_at: str | None,
+    execution_log_tail: str | None = None,
+    execution_log_truncated: bool = False,
+    progress_line: str | None = None,
 ) -> dict[str, Any]:
     return {
         "slot_index": slot_index,
@@ -247,7 +252,30 @@ def _slot_progress_payload(
         "http_status": http_status,
         "run_started_at": started_at,
         "run_finished_at": finished_at,
+        "execution_log_tail": execution_log_tail,
+        "execution_log_truncated": execution_log_truncated,
+        "progress_line": progress_line,
     }
+
+
+def _append_execution_log_lines(
+    lines: deque[str],
+    text: str | None,
+    truncated_ref: list[bool],
+) -> None:
+    if not text:
+        return
+    for raw in str(text).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if len(lines) == lines.maxlen:
+            truncated_ref[0] = True
+        lines.append(line)
+
+
+def _execution_log_tail_from_lines(lines: deque[str]) -> str | None:
+    return "\n".join(lines) if lines else None
 
 
 def _progress_from_completed_run(
@@ -271,6 +299,12 @@ def _progress_from_completed_run(
     out_tail, out_trunc = _truncate_tool_log_tail(stdout_raw if stdout_raw else None)
     err_tail, err_trunc = _truncate_tool_log_tail(stderr_raw if stderr_raw else None)
     rs = run_status_override or _infer_terminal_run_status(http_status, result_obj)
+    exec_lines: deque[str] = deque(maxlen=_EXECUTION_LOG_TAIL_LINES)
+    exec_truncated = [False]
+    if stdout_raw:
+        _append_execution_log_lines(exec_lines, "\n".join(f"STDOUT: {ln}" for ln in stdout_raw.splitlines()), exec_truncated)
+    if stderr_raw:
+        _append_execution_log_lines(exec_lines, "\n".join(f"STDERR: {ln}" for ln in stderr_raw.splitlines()), exec_truncated)
 
     now = _utc_now_iso()
     return {
@@ -282,6 +316,9 @@ def _progress_from_completed_run(
         "exit_code": exit_code,
         "http_status": http_status if http_status else None,
         "run_finished_at": now,
+        "execution_log_tail": _execution_log_tail_from_lines(exec_lines),
+        "execution_log_truncated": exec_truncated[0],
+        "progress_line": None,
     }
 
 
@@ -2293,6 +2330,9 @@ async def _run_one_tool_detailed(
             "exit_code": None,
             "http_status": 403,
             "run_finished_at": _utc_now_iso(),
+            "execution_log_tail": "ERROR: Tool endpoint is not allowed.",
+            "execution_log_truncated": False,
+            "progress_line": None,
         }
         return json.dumps(err_obj), meta, 403
 
@@ -2347,6 +2387,9 @@ async def _run_one_tool_detailed(
     rid = uuid.uuid4().hex
     stdout_acc = ""
     stderr_acc = ""
+    execution_log_lines: deque[str] = deque(maxlen=_EXECUTION_LOG_TAIL_LINES)
+    execution_log_truncated = [False]
+    progress_line: str | None = None
     emit_times: list[float] = [0.0]
 
     async def emit_accumulated(*, force: bool = False) -> None:
@@ -2357,6 +2400,7 @@ async def _run_one_tool_detailed(
         emit_times[0] = now
         out_tail, out_trunc = _truncate_tool_log_tail(stdout_acc if stdout_acc else None)
         err_tail, err_trunc = _truncate_tool_log_tail(stderr_acc if stderr_acc else None)
+        exec_tail = _execution_log_tail_from_lines(execution_log_lines)
         await emit_cb(
             _slot_progress_payload(
                 slot_index=slot_index,
@@ -2370,11 +2414,14 @@ async def _run_one_tool_detailed(
                 http_status=None,
                 started_at=started_at_str,
                 finished_at=None,
+                execution_log_tail=exec_tail,
+                execution_log_truncated=execution_log_truncated[0],
+                progress_line=progress_line,
             )
         )
 
     async def on_chunk(evt: dict[str, Any]) -> None:
-        nonlocal stdout_acc, stderr_acc
+        nonlocal stdout_acc, stderr_acc, progress_line
         t = evt.get("type")
         if t == "terminal":
             return
@@ -2383,6 +2430,12 @@ async def _run_one_tool_detailed(
             await emit_accumulated()
         elif t == "stderr":
             stderr_acc += str(evt.get("text") or "")
+            await emit_accumulated()
+        elif t == "log":
+            _append_execution_log_lines(execution_log_lines, str(evt.get("text") or ""), execution_log_truncated)
+            await emit_accumulated()
+        elif t == "progress":
+            progress_line = str(evt.get("text") or "").strip() or None
             await emit_accumulated()
 
     run_task = asyncio.create_task(
@@ -2413,6 +2466,9 @@ async def _run_one_tool_detailed(
             "exit_code": None,
             "http_status": None,
             "run_finished_at": _utc_now_iso(),
+            "execution_log_tail": _execution_log_tail_from_lines(execution_log_lines),
+            "execution_log_truncated": execution_log_truncated[0],
+            "progress_line": progress_line,
         }
         return json.dumps({"error": str(exc)}), meta, 500
 
@@ -2429,6 +2485,11 @@ async def _run_one_tool_detailed(
     )
     result_text = _prepare_agent_tool_result_for_llm(settings, result_obj, status_code)
     meta = _progress_from_completed_run(status_code, result_obj)
+    live_exec_tail = _execution_log_tail_from_lines(execution_log_lines)
+    if live_exec_tail:
+        meta["execution_log_tail"] = live_exec_tail
+        meta["execution_log_truncated"] = execution_log_truncated[0]
+    meta["progress_line"] = progress_line
     return result_text, meta, status_code
 
 
@@ -2517,6 +2578,9 @@ async def execute_tool_slots_follow_up(
                     "stderr_truncated": False,
                     "exit_code": None,
                     "http_status": None,
+                    "execution_log_tail": None,
+                    "execution_log_truncated": False,
+                    "progress_line": None,
                 },
             )
         elif d == "approve" and tn in disabled:
@@ -2532,6 +2596,9 @@ async def execute_tool_slots_follow_up(
                     "stderr_truncated": False,
                     "exit_code": None,
                     "http_status": None,
+                    "execution_log_tail": None,
+                    "execution_log_truncated": False,
+                    "progress_line": None,
                 },
             )
         elif d == "approve":
@@ -2546,6 +2613,9 @@ async def execute_tool_slots_follow_up(
                     "stderr_truncated": False,
                     "exit_code": None,
                     "http_status": None,
+                    "execution_log_tail": None,
+                    "execution_log_truncated": False,
+                    "progress_line": None,
                 },
             )
         working_slots.append(row)
@@ -2598,6 +2668,9 @@ async def execute_tool_slots_follow_up(
             "exit_code": None,
             "http_status": None,
             "run_finished_at": fin,
+            "execution_log_tail": "ERROR: Tool execution interrupted before completion",
+            "execution_log_truncated": False,
+            "progress_line": None,
         }
         result_text = json.dumps({"error": "Tool execution interrupted before completion"})
         try:
@@ -2628,6 +2701,9 @@ async def execute_tool_slots_follow_up(
                     "exit_code": None,
                     "http_status": None,
                     "run_finished_at": fin_err,
+                    "execution_log_tail": f"ERROR: {exc}",
+                    "execution_log_truncated": False,
+                    "progress_line": None,
                 }
                 result_text = json.dumps({"error": str(exc)})
         finally:
@@ -2658,6 +2734,9 @@ async def execute_tool_slots_follow_up(
                 "stderr_truncated": False,
                 "exit_code": None,
                 "http_status": None,
+                "execution_log_tail": None,
+                "execution_log_truncated": False,
+                "progress_line": None,
             }
             _merge_slot_patch(working_slots, idx, patch_run)
             await persist_working_if_batch()
@@ -2676,6 +2755,9 @@ async def execute_tool_slots_follow_up(
                         http_status=None,
                         started_at=started,
                         finished_at=None,
+                        execution_log_tail=None,
+                        execution_log_truncated=False,
+                        progress_line=None,
                     ),
                 )
                 await _sse_flush_tick()
@@ -2690,6 +2772,9 @@ async def execute_tool_slots_follow_up(
                 "stderr_truncated": bool(body.get("stderr_truncated")),
                 "exit_code": body.get("exit_code"),
                 "http_status": body.get("http_status"),
+                "execution_log_tail": body.get("execution_log_tail"),
+                "execution_log_truncated": bool(body.get("execution_log_truncated")),
+                "progress_line": body.get("progress_line"),
             }
             _merge_slot_patch(working_slots, idx_sp, patch_sp)
             await persist_working_if_batch()
@@ -2725,6 +2810,9 @@ async def execute_tool_slots_follow_up(
                         finished_at=prog.get("run_finished_at")
                         if isinstance(prog.get("run_finished_at"), str)
                         else None,
+                        execution_log_tail=prog.get("execution_log_tail"),
+                        execution_log_truncated=bool(prog.get("execution_log_truncated")),
+                        progress_line=prog.get("progress_line"),
                     ),
                 )
                 await _sse_flush_tick()

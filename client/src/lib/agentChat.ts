@@ -22,6 +22,9 @@ export type AgentChatToolCallState = {
   stderr_tail?: string | null;
   stdout_truncated?: boolean;
   stderr_truncated?: boolean;
+  execution_log_tail?: string | null;
+  execution_log_truncated?: boolean;
+  progress_line?: string | null;
   exit_code?: number | null;
   http_status?: number | null;
   run_started_at?: string | null;
@@ -45,6 +48,9 @@ export type AgentChatBatchSlot = {
   stderr_tail?: string | null;
   stdout_truncated?: boolean;
   stderr_truncated?: boolean;
+  execution_log_tail?: string | null;
+  execution_log_truncated?: boolean;
+  progress_line?: string | null;
   exit_code?: number | null;
   http_status?: number | null;
   run_started_at?: string | null;
@@ -146,6 +152,9 @@ export type AgentChatToolBatchSlotProgressPayload = {
   stderr_tail?: string | null;
   stdout_truncated?: boolean;
   stderr_truncated?: boolean;
+  execution_log_tail?: string | null;
+  execution_log_truncated?: boolean;
+  progress_line?: string | null;
   exit_code?: number | null;
   http_status?: number | null;
   run_started_at?: string | null;
