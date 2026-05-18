@@ -30,11 +30,11 @@ from app.schemas.agent_chat import (
     AgentChatToolDecisionsPatch,
 )
 from app.services.agent_chat import (
-    TOOL_EXEC_JSON_MARKDOWN_FENCE,
     RouterTurnResult,
     _EXPLICIT_RUN_TOOL_RE,
     _agent_chat_skip_tool_approval_prompt,
     _looks_like_contextual_tool_follow_up,
+    assistant_and_tool_result_pair,
     message_references_pronoun_target,
     recent_target_from_rows,
     infer_retry_rejected_tool_names,
@@ -62,7 +62,6 @@ from app.services.agent_chat import (
     stream_cipherstrike_turn,
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
-    tool_result_llm_message,
     touch_session_ui_context,
     _run_one_tool_detailed,
     _slot_progress_payload,
@@ -598,6 +597,15 @@ async def tool_confirm_stream(
     async def gen():
         try:
             if not body.approved:
+                # Atomic rejection: only one transition from pending → rejected wins.
+                claim_rej = await db[AGENT_CHAT_MESSAGES_COLLECTION].find_one_and_update(
+                    {"_id": aid, "tool_call.state": "pending"},
+                    {"$set": {"tool_call.state": "rejected"}},
+                )
+                if claim_rej is None:
+                    yield "data: [ERROR] This tool call has already been decided.\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 cancel = f"The operator chose not to run {tool_name}."
                 await insert_message(
                     db,
@@ -607,10 +615,6 @@ async def tool_confirm_stream(
                     role="tool",
                     content=cancel,
                     tool_name=tool_name,
-                )
-                await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
-                    {"_id": aid},
-                    {"$set": {"tool_call.state": "rejected"}},
                 )
                 # Strip the rejected tool from the follow-up schemas so the model literally
                 # cannot re-request it; otherwise rejection → instant re-request loop.
@@ -632,7 +636,11 @@ async def tool_confirm_stream(
                         "or wait for further instructions."
                     ),
                 }
-                follow_msgs = list(snapshot) + [reject_system, tool_result_llm_message(cancel, tool_name)]
+                follow_msgs = (
+                    list(snapshot)
+                    + [reject_system]
+                    + assistant_and_tool_result_pair(tool_name, args, cancel, call_id=str(aid))
+                )
                 async for chunk in stream_follow_up_after_tool(
                     settings,
                     db,
@@ -658,9 +666,18 @@ async def tool_confirm_stream(
                 return
 
             # Same log tail / meta path as batch execute; stream [TOOL_BATCH_SLOT_PROGRESS] for UI (slot 0).
+            # Atomic state transition: only one approval wins the race. If two requests arrive
+            # concurrently (e.g. double-click), the loser sees no match and aborts cleanly.
             started_iso = _utc_now_iso()
-            await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
-                {"_id": aid},
+            claim = await db[AGENT_CHAT_MESSAGES_COLLECTION].find_one_and_update(
+                {
+                    "_id": aid,
+                    "tool_call.state": "pending",
+                    "$or": [
+                        {"tool_call.run_status": {"$in": [None, "", "queued"]}},
+                        {"tool_call.run_status": {"$exists": False}},
+                    ],
+                },
                 {
                     "$set": {
                         "tool_call.run_status": "running",
@@ -675,6 +692,10 @@ async def tool_confirm_stream(
                     },
                 },
             )
+            if claim is None:
+                yield "data: [ERROR] This tool call has already been approved or is no longer pending.\n\n"
+                yield "data: [DONE]\n\n"
+                return
             yield _sse_tool_batch_slot_progress(
                 aid,
                 _slot_progress_payload(
@@ -750,21 +771,11 @@ async def tool_confirm_stream(
                 }
                 result_text = json.dumps({"error": str(exc)})
 
-            exec_record = (
-                f"[Tool executed: **{tool_name}**]\n"
-                f"Arguments: `{json.dumps(args)}`\n"
-                f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
-            )
+            # Persist the tool result ONLY as a tool-role message (no duplicate assistant markdown).
+            # The original assistant message (aid) carries the tool_call state + execution metadata
+            # for the UI to render. Attachments derived from the result are stored on the assistant
+            # message (aid) so the UI can show download links next to the tool card.
             att = attachments_from_tool_result_json(result_text)
-            await insert_message(
-                db,
-                organization_id=user["organization_id"],
-                user_id=user["_id"],
-                session_id=sid,
-                role="assistant",
-                content=exec_record,
-                attachments=att,
-            )
             await insert_message(
                 db,
                 organization_id=user["organization_id"],
@@ -772,24 +783,27 @@ async def tool_confirm_stream(
                 session_id=sid,
                 role="tool",
                 content=result_text,
+                tool_name=tool_name,
             )
             finished_iso = prog.get("run_finished_at") if isinstance(prog.get("run_finished_at"), str) else None
+            tool_call_updates: dict[str, Any] = {
+                "tool_call.state": "confirmed",
+                "tool_call.run_status": str(prog.get("run_status") or "done"),
+                "tool_call.stdout_tail": prog.get("stdout_tail"),
+                "tool_call.stderr_tail": prog.get("stderr_tail"),
+                "tool_call.stdout_truncated": bool(prog.get("stdout_truncated")),
+                "tool_call.stderr_truncated": bool(prog.get("stderr_truncated")),
+                "tool_call.exit_code": prog.get("exit_code"),
+                "tool_call.http_status": prog.get("http_status"),
+                "tool_call.run_started_at": started_iso,
+                "tool_call.run_finished_at": finished_iso,
+                "tool_call.result_text": result_text,
+            }
+            if att:
+                tool_call_updates["attachments"] = att
             await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
                 {"_id": aid},
-                {
-                    "$set": {
-                        "tool_call.state": "confirmed",
-                        "tool_call.run_status": str(prog.get("run_status") or "done"),
-                        "tool_call.stdout_tail": prog.get("stdout_tail"),
-                        "tool_call.stderr_tail": prog.get("stderr_tail"),
-                        "tool_call.stdout_truncated": bool(prog.get("stdout_truncated")),
-                        "tool_call.stderr_truncated": bool(prog.get("stderr_truncated")),
-                        "tool_call.exit_code": prog.get("exit_code"),
-                        "tool_call.http_status": prog.get("http_status"),
-                        "tool_call.run_started_at": started_iso,
-                        "tool_call.run_finished_at": finished_iso,
-                    },
-                },
+                {"$set": tool_call_updates},
             )
 
             yield _sse_tool_batch_slot_progress(
@@ -830,10 +844,11 @@ async def tool_confirm_stream(
                     "If a different tool is genuinely needed, you may call it — otherwise, write a clear summary."
                 ),
             }
-            follow_msgs = list(snapshot) + [
-                summarize_system,
-                tool_result_llm_message(result_text, tool_name),
-            ]
+            follow_msgs = (
+                list(snapshot)
+                + [summarize_system]
+                + assistant_and_tool_result_pair(tool_name, args, result_text, call_id=str(aid))
+            )
             async for chunk in stream_follow_up_after_tool(
                 settings,
                 db,

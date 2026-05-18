@@ -26,6 +26,9 @@ export type AgentChatToolCallState = {
   http_status?: number | null;
   run_started_at?: string | null;
   run_finished_at?: string | null;
+  /** Full tool-result JSON cached on the assistant message after execution (replaces the
+   *  legacy "[Tool executed:]" duplicate assistant markdown). */
+  result_text?: string | null;
 };
 
 export type AgentChatBatchSlot = {
@@ -46,6 +49,10 @@ export type AgentChatBatchSlot = {
   http_status?: number | null;
   run_started_at?: string | null;
   run_finished_at?: string | null;
+  /** Full tool-result JSON cached on the slot after execution (parallel to single tool_call.result_text). */
+  result_text?: string | null;
+  /** Per-slot attachments (PDFs etc. carved from the result). */
+  attachments?: AgentChatAttachment[];
 };
 
 export type AgentChatAttachment = {

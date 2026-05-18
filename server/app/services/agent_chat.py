@@ -1083,6 +1083,152 @@ def tool_result_llm_message(content: str, tool_name: str = "") -> dict[str, Any]
     return {"role": "tool", "content": content, "name": tn}
 
 
+def assistant_and_tool_result_pair(
+    tool_name: str,
+    arguments: dict[str, Any] | None,
+    result_content: str,
+    *,
+    call_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Produce the [assistant(tool_calls), tool(result)] pair to append to follow-up history.
+
+    Some LLM providers (esp. OpenAI strict tool mode) reject a bare tool-role message that
+    doesn't follow a matching assistant tool_calls message. Always emit the pair together so
+    the model sees a coherent function-call turn.
+    """
+    tn = (tool_name or "").strip() or "tool"
+    cid = call_id or _new_synthetic_call_id()
+    args = arguments if isinstance(arguments, dict) else {}
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": cid,
+                    "type": "function",
+                    "function": {"name": tn, "arguments": json.dumps(args)},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": cid, "name": tn, "content": result_content},
+    ]
+
+
+# Regex strips legacy assistant messages that embedded the executed-tool markdown.
+# The fence may be three or four backticks; allow any opener of >= 3 of the same character.
+_LEGACY_TOOL_EXECUTED_MARKDOWN_RE = re.compile(
+    r"\[Tool executed:\s*\*\*[^*]+\*\*\][\s\S]*?(?:`{3,}json[\s\S]*?`{3,}|$)",
+    re.IGNORECASE,
+)
+_LEGACY_TOOL_CALL_REQUESTED_RE = re.compile(
+    r"\[Tool call requested:\s*\*\*[^*]+\*\*\][\s\S]*?(?:`[^`]*`|$)",
+    re.IGNORECASE,
+)
+# Marker contents we now persist instead of the imitable markdown — strip from LLM history.
+_INTERNAL_TOOL_MARKER_RE = re.compile(r"^_tool_call_(?:pending|completed):[^_]+_$")
+
+
+def _strip_legacy_tool_markdown(content: str) -> str:
+    """Remove imitable tool markdown blocks from old assistant messages before re-feeding to LLM."""
+    if not content:
+        return content
+    cleaned = _LEGACY_TOOL_EXECUTED_MARKDOWN_RE.sub("", content)
+    cleaned = _LEGACY_TOOL_CALL_REQUESTED_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _assistant_row_to_openai(row: dict[str, Any], call_id: str) -> dict[str, Any] | None:
+    """Convert an assistant row into an OpenAI-format message.
+
+    - Confirmed/rejected tool_call → assistant with structured tool_calls field (content="")
+    - Pending tool_call → omit entirely (the LLM doesn't need to see still-pending calls; the
+      follow-up turn that includes the result will provide structured tool_calls + tool result)
+    - Batch tool_calls list → assistant with one tool_calls entry per slot that has a result
+    - Plain text assistant → as-is after stripping legacy markdown
+    Returns None when the row should be skipped (e.g. pending tool call, marker-only content).
+    """
+    tc = row.get("tool_call") if isinstance(row.get("tool_call"), dict) else None
+    tcs = row.get("tool_calls") if isinstance(row.get("tool_calls"), list) else None
+    content = str(row.get("content") or "")
+
+    # Skip marker-only content (no tool_call/tool_calls fields means stale marker; nothing to send)
+    if not tc and not tcs and _INTERNAL_TOOL_MARKER_RE.match(content.strip()):
+        return None
+
+    # Single tool_call message
+    if tc:
+        state = str(tc.get("state") or "").lower()
+        tn = str(tc.get("tool_name") or "").strip()
+        args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+        if not tn:
+            return None
+        if state == "pending":
+            # Still awaiting human decision; nothing useful for the LLM yet
+            return None
+        if state in ("rejected",):
+            # Represent as a tool_call + tool result (rejection note) so the model sees the
+            # full decision in its native structured format
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": tn, "arguments": json.dumps(args)},
+                    },
+                ],
+            }
+        # Confirmed (executed): emit structured tool_calls
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tn, "arguments": json.dumps(args)},
+                },
+            ],
+        }
+
+    # Batch tool_calls
+    if tcs:
+        calls_out: list[dict[str, Any]] = []
+        for i, slot in enumerate(tcs):
+            if not isinstance(slot, dict):
+                continue
+            tn = str(slot.get("tool_name") or "").strip()
+            if not tn:
+                continue
+            decision = str(slot.get("human_decision") or "").lower()
+            # Skip slots that were never approved (so they don't appear as tool_calls without a
+            # matching tool-result message)
+            if decision == "reject":
+                continue
+            args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
+            # Prefer persisted call_id (set by execute_tool_slots_follow_up at batch execution
+            # time) so rebuilds match what the previous turn's follow-up LLM saw.
+            slot_call_id = str(slot.get("call_id") or "").strip() or f"{call_id}_{i}"
+            calls_out.append(
+                {
+                    "id": slot_call_id,
+                    "type": "function",
+                    "function": {"name": tn, "arguments": json.dumps(args)},
+                },
+            )
+        if not calls_out:
+            return None
+        return {"role": "assistant", "content": "", "tool_calls": calls_out}
+
+    # Plain text assistant — strip legacy markdown so it doesn't poison the model
+    cleaned = _strip_legacy_tool_markdown(content)
+    if not cleaned:
+        return None
+    return {"role": "assistant", "content": cleaned}
+
+
 def build_llm_messages_from_history(
     settings: Settings,
     rows: list[dict[str, Any]],
@@ -1090,6 +1236,14 @@ def build_llm_messages_from_history(
     extra_system: str | None = None,
     conversation_summary: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Reconstruct an OpenAI-compatible message list from persisted Mongo rows.
+
+    Critical: assistant messages with structured tool_call/tool_calls are emitted in
+    OpenAI's native `tool_calls` shape (NOT as stringified markdown text). This prevents
+    the model from imitating its own previous "[Tool executed: ...]" markdown as plain
+    text on subsequent turns. Legacy rows (pre-refactor) with markdown content get the
+    markdown stripped before being fed to the LLM.
+    """
     messages: list[dict[str, Any]] = [{"role": "system", "content": settings.agent_chat_system_prompt}]
     if conversation_summary and conversation_summary.strip():
         messages.append(
@@ -1103,18 +1257,79 @@ def build_llm_messages_from_history(
     effective_rows = rows
     if conversation_summary and conversation_summary.strip() and len(rows) > _TAIL_MESSAGES_WITH_SUMMARY:
         effective_rows = rows[-_TAIL_MESSAGES_WITH_SUMMARY:]
+
+    # Track the last assistant message we emitted with tool_calls so we can attach an "id"
+    # to subsequent tool-role messages that lack one (OpenAI requires tool_call_id linkage).
+    last_assistant_tool_call_ids: list[tuple[str, str]] = []  # [(call_id, tool_name), ...]
+
     for row in effective_rows:
         role = str(row.get("role") or "user")
-        content = str(row.get("content") or "")
-        if role not in ("user", "assistant", "tool"):
-            role = "user"
-        entry: dict[str, Any] = {"role": role, "content": content}
+        row_id = str(row.get("_id") or row.get("id") or "")
+        if role == "user":
+            content = str(row.get("content") or "")
+            if content:
+                messages.append({"role": "user", "content": content})
+            continue
+
+        if role == "assistant":
+            call_id = row_id or _new_synthetic_call_id()
+            out = _assistant_row_to_openai(row, call_id)
+            if out is None:
+                continue
+            messages.append(out)
+            # Remember tool_call ids for the next tool messages to link to
+            if "tool_calls" in out:
+                last_assistant_tool_call_ids = [
+                    (str(tc.get("id") or ""), str(((tc.get("function") or {}).get("name") or "")))
+                    for tc in out["tool_calls"]
+                    if isinstance(tc, dict)
+                ]
+            else:
+                last_assistant_tool_call_ids = []
+            continue
+
         if role == "tool":
+            content = str(row.get("content") or "")
+            if not content:
+                continue
             tn = str(row.get("tool_name") or row.get("name") or "").strip()
+            tn_lower = tn.lower()
+            entry: dict[str, Any] = {"role": "tool", "content": content}
             if tn:
                 entry["name"] = tn
-        messages.append(entry)
+            # Best-effort tool_call_id linkage: match by tool_name (case-insensitive) against
+            # the most recent assistant tool_calls block. If a match exists, use it and consume it.
+            matched = False
+            for i, (cid, ctn) in enumerate(last_assistant_tool_call_ids):
+                if ctn and cid and ctn.strip().lower() == tn_lower:
+                    entry["tool_call_id"] = cid
+                    last_assistant_tool_call_ids.pop(i)
+                    matched = True
+                    break
+            if not matched and tn:
+                # No preceding assistant tool_calls slot to link to. This usually means a legacy
+                # row or a tool result that the assistant emitted without going through the
+                # function-call schema. Drop the entry — passing a tool-role message without a
+                # paired assistant tool_calls turn breaks strict providers (OpenAI in strict mode).
+                logger.debug(
+                    "build_llm_messages: orphan tool message tool_name=%r dropped (no preceding tool_calls)",
+                    tn,
+                )
+                continue
+            messages.append(entry)
+            continue
+
+        # Unknown role: drop it (don't pollute LLM context with weird shapes)
+        continue
+
     return messages
+
+
+def _new_synthetic_call_id() -> str:
+    """Synthetic tool_call_id for transient pairing. Full UUID hex to avoid collisions in
+    high-volume batch scenarios where many ids are generated in the same turn."""
+    import uuid as _uuid
+    return f"call_{_uuid.uuid4().hex}"
 
 
 def context_snippet(ctx: dict[str, Any] | None) -> str | None:
@@ -1311,24 +1526,50 @@ def _clean_target_token(tok: str) -> str:
 
 
 def recent_target_from_rows(rows: list[dict[str, Any]] | None, *, current_user_message: str = "") -> str:
-    """Return the most recent target (URL / IP / hostname) mentioned in the conversation, or ''."""
+    """Return the most recent target (URL / IP / hostname) mentioned in the conversation, or ''.
+
+    Looks at: user content, assistant content, tool content, and structured tool_call /
+    tool_calls argument values. This makes pronoun resolution work for both legacy markdown
+    rows and the new structured-only format.
+    """
     if not rows:
         return ""
     cur_msg_norm = (current_user_message or "").strip()
     skipped_current = False
-    for m in reversed(rows[-32:]):
-        role = str(m.get("role") or "")
-        content = str(m.get("content") or "").strip()
-        if not content:
-            continue
-        if role == "user" and not skipped_current and cur_msg_norm and content.strip() == cur_msg_norm:
-            skipped_current = True
-            continue
-        for match in _TARGET_HINT_RE.finditer(content):
+
+    def _try_extract(text: str) -> str:
+        for match in _TARGET_HINT_RE.finditer(text or ""):
             tok = _clean_target_token(match.group(0))
             if not tok or tok.lower() in {"e.g", "i.e"}:
                 continue
             return tok
+        return ""
+
+    for m in reversed(rows[-32:]):
+        role = str(m.get("role") or "")
+        content = str(m.get("content") or "").strip()
+        if role == "user" and not skipped_current and cur_msg_norm and content == cur_msg_norm:
+            skipped_current = True
+            continue
+        # Check structured tool_call / tool_calls fields first (new format)
+        if role == "assistant":
+            tc = m.get("tool_call") if isinstance(m.get("tool_call"), dict) else None
+            if tc:
+                hit = _try_extract(json.dumps(tc.get("arguments") or {}))
+                if hit:
+                    return hit
+            tcs = m.get("tool_calls") if isinstance(m.get("tool_calls"), list) else None
+            if tcs:
+                for slot in tcs:
+                    if isinstance(slot, dict):
+                        hit = _try_extract(json.dumps(slot.get("arguments") or {}))
+                        if hit:
+                            return hit
+        if not content:
+            continue
+        hit = _try_extract(content)
+        if hit:
+            return hit
     return ""
 
 
@@ -1374,6 +1615,16 @@ def _build_router_context(rows: list[dict[str, Any]] | None, *, current_user_mes
     for m in reversed(rows[-16:]):
         role = str(m.get("role") or "")
         content = str(m.get("content") or "").strip()
+        # Mine targets from the structured tool_call / tool_calls fields (new format).
+        if role == "assistant":
+            tc = m.get("tool_call") if isinstance(m.get("tool_call"), dict) else None
+            if tc:
+                _maybe_record_targets(json.dumps(tc.get("arguments") or {}))
+            tcs = m.get("tool_calls") if isinstance(m.get("tool_calls"), list) else None
+            if tcs:
+                for slot in tcs:
+                    if isinstance(slot, dict):
+                        _maybe_record_targets(json.dumps(slot.get("arguments") or {}))
         if not content:
             continue
         if role == "user" and not skipped_current and cur_msg_norm and content.strip() == cur_msg_norm:
@@ -1383,8 +1634,11 @@ def _build_router_context(rows: list[dict[str, Any]] | None, *, current_user_mes
             # Tool result messages often carry the target/URL; mine them for hints only.
             _maybe_record_targets(content)
             continue
+        # Marker-only assistant content: skip (no useful prose) but already mined tool_call above.
+        if role == "assistant" and _INTERNAL_TOOL_MARKER_RE.match(content):
+            continue
         if role == "assistant" and ("[Tool " in content or "[TOOL_" in content or "Tool batch pending" in content):
-            # Mine the assistant tool markup for targets, but don't include the markup text.
+            # Legacy markdown: mine for targets, but don't include the markup text.
             _maybe_record_targets(content)
             continue
         if role not in ("user", "assistant"):
@@ -1718,7 +1972,11 @@ async def stream_cipherstrike_turn(
                     rest = payload[len("[TOOL_CALL_BATCH_PENDING]") :].strip()
                     try:
                         envelope = json.loads(rest)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as _je:
+                        logger.error(
+                            "stream_cipherstrike_turn: malformed TOOL_CALL_BATCH_PENDING JSON: %s; payload=%r",
+                            _je, rest[:200],
+                        )
                         envelope = {}
                     calls = envelope.get("calls") if isinstance(envelope.get("calls"), list) else []
                     calls = filter_tool_batch_calls(
@@ -1797,12 +2055,24 @@ async def stream_cipherstrike_turn(
                     rest = payload[len("[TOOL_CALL_PENDING]") :].strip()
                     try:
                         pending_data = json.loads(rest)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as _je:
+                        logger.error(
+                            "stream_cipherstrike_turn: malformed TOOL_CALL_PENDING JSON: %s; payload=%r",
+                            _je, rest[:200],
+                        )
                         pending_data = {}
                     tool_name = str(pending_data.get("tool_name") or "")
                     args = pending_data.get("arguments") if isinstance(pending_data.get("arguments"), dict) else {}
                     endpoint = str(pending_data.get("endpoint") or "")
                     desc = str(pending_data.get("description") or "")
+                    # Guard: bridge sent a pending event without a tool_name (data corruption).
+                    if not tool_name.strip():
+                        logger.error(
+                            "stream_cipherstrike_turn: TOOL_CALL_PENDING with empty tool_name; payload=%r",
+                            rest[:200],
+                        )
+                        skip_outer_yield = True
+                        continue
                     single_auto = auto_accept_tools or _agent_chat_skip_tool_approval_prompt(tool_name)
                     logger.info(
                         "stream_cipherstrike_turn: [TOOL_CALL_PENDING] tool=%r args_keys=%s endpoint=%r auto_accept=%s skip_prompt=%s -> %s_path",
@@ -2453,7 +2723,11 @@ async def execute_tool_slots_follow_up(
             {},
         )
 
-    follow_tool_msgs: list[dict[str, str]] = []
+    # Each tuple: (call_id, tool_name, args, result_content). The call_id is deterministic
+    # (derived from batch message id + slot_index) so the in-memory follow-up and any later
+    # rebuild via build_llm_messages_from_history produce IDENTICAL tool_call_id linkage.
+    batch_msg_id_str = str(batch_message_id) if batch_message_id is not None else _new_synthetic_call_id()
+    completed_results: list[tuple[str, str, dict[str, Any], str]] = []
     updated_slots: list[dict[str, Any]] = []
     for slot in ordered:
         idx = int(slot.get("slot_index", 0))
@@ -2461,6 +2735,7 @@ async def execute_tool_slots_follow_up(
         decision = str(slot.get("human_decision") or "").lower()
         args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
         cur = _working_row_for_slot_index(idx)
+        slot_call_id = f"{batch_msg_id_str}_{idx}"
 
         if decision == "reject":
             skip_txt = f"[Skipped **{tn}** — operator rejected]"
@@ -2473,8 +2748,8 @@ async def execute_tool_slots_follow_up(
                 content=skip_txt,
                 tool_name=tn,
             )
-            follow_tool_msgs.append(tool_result_llm_message(skip_txt, tn))
-            updated_slots.append({**cur, "execution_outcome": "rejected"})
+            completed_results.append((slot_call_id, tn, args, skip_txt))
+            updated_slots.append({**cur, "execution_outcome": "rejected", "call_id": slot_call_id})
             continue
 
         if tn.strip() in disabled:
@@ -2484,40 +2759,20 @@ async def execute_tool_slots_follow_up(
                 organization_id=organization_id,
                 user_id=user_id,
                 session_id=session_id,
-                role="assistant",
-                content=f"[Tool blocked: **{tn}**]",
-            )
-            await insert_message(
-                db,
-                organization_id=organization_id,
-                user_id=user_id,
-                session_id=session_id,
                 role="tool",
                 content=err_txt,
                 tool_name=tn,
             )
-            follow_tool_msgs.append(tool_result_llm_message(err_txt, tn))
-            updated_slots.append({**cur, "execution_outcome": "blocked"})
+            completed_results.append((slot_call_id, tn, args, err_txt))
+            updated_slots.append({**cur, "execution_outcome": "blocked", "call_id": slot_call_id})
             continue
 
         result_text = results_by_idx.get(idx)
         if result_text is None:
             result_text = json.dumps({"error": "Tool did not return a result"})
-        exec_record = (
-            f"[Tool executed: **{tn}**]\n"
-            f"Arguments: `{json.dumps(args)}`\n"
-            f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
-        )
         att = attachments_from_tool_result_json(result_text)
-        await insert_message(
-            db,
-            organization_id=organization_id,
-            user_id=user_id,
-            session_id=session_id,
-            role="assistant",
-            content=exec_record,
-            attachments=att,
-        )
+        # Tool result lives on the tool-role message (for LLM context) and inline on the slot
+        # (for UI render). No duplicate assistant markdown message — that caused format imitation.
         await insert_message(
             db,
             organization_id=organization_id,
@@ -2527,13 +2782,21 @@ async def execute_tool_slots_follow_up(
             content=result_text,
             tool_name=tn,
         )
-        follow_tool_msgs.append(tool_result_llm_message(result_text, tn))
+        completed_results.append((slot_call_id, tn, args, result_text))
         eo = (
             "error"
             if str(cur.get("run_status") or "") == "error"
             else "completed"
         )
-        updated_slots.append({**cur, "execution_outcome": eo})
+        slot_patch: dict[str, Any] = {
+            **cur,
+            "execution_outcome": eo,
+            "result_text": result_text,
+            "call_id": slot_call_id,
+        }
+        if att:
+            slot_patch["attachments"] = att
+        updated_slots.append(slot_patch)
 
     if batch_message_id is not None and batch_filter is not None:
         await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
@@ -2569,7 +2832,33 @@ async def execute_tool_slots_follow_up(
             "Do NOT re-call any of the tools that already ran in this batch."
         ),
     }
-    follow_llm = list(snapshot) + [batch_summarize_system] + follow_tool_msgs
+    # Build a single assistant turn with all the batch tool_calls, then one tool-role message
+    # per result, each linked by tool_call_id. Call_ids are the deterministic per-slot IDs
+    # persisted above, so a later turn rebuilt from Mongo produces identical linkage.
+    assistant_tool_calls_block: list[dict[str, Any]] = []
+    tool_result_messages: list[dict[str, Any]] = []
+    for cid, tn, args_, result_content in completed_results:
+        assistant_tool_calls_block.append(
+            {
+                "id": cid,
+                "type": "function",
+                "function": {"name": tn, "arguments": json.dumps(args_)},
+            },
+        )
+        tool_result_messages.append(
+            {"role": "tool", "tool_call_id": cid, "name": tn, "content": result_content},
+        )
+    batch_assistant_turn = (
+        [{"role": "assistant", "content": "", "tool_calls": assistant_tool_calls_block}]
+        if assistant_tool_calls_block
+        else []
+    )
+    follow_llm = (
+        list(snapshot)
+        + [batch_summarize_system]
+        + batch_assistant_turn
+        + tool_result_messages
+    )
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -2630,7 +2919,7 @@ async def _auto_execute_single_tool_sse(
             content=err_txt,
             tool_name=tool_name,
         )
-        follow_llm = list(snapshot) + [tool_result_llm_message(err_txt, tool_name)]
+        follow_llm = list(snapshot) + assistant_and_tool_result_pair(tool_name, args, err_txt)
         async for chunk in stream_follow_up_after_tool(
             settings,
             db,
@@ -2658,19 +2947,26 @@ async def _auto_execute_single_tool_sse(
         logger.exception("auto single tool %s", tool_name)
         result_text = json.dumps({"error": str(exc)})
 
-    exec_record = (
-        f"[Tool executed: **{tool_name}**]\n"
-        f"Arguments: `{json.dumps(args)}`\n"
-        f"Result:\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}json\n{result_text}\n{TOOL_EXEC_JSON_MARKDOWN_FENCE}"
-    )
     att = attachments_from_tool_result_json(result_text)
-    await insert_message(
+    # Persist a structured assistant message describing the auto-executed tool. The tool_call
+    # field carries the full execution metadata for the UI; no imitable markdown in content.
+    auto_tc: dict[str, Any] = {
+        "state": "confirmed",
+        "tool_name": tool_name,
+        "arguments": args,
+        "endpoint": endpoint,
+        "description": "",
+        "run_status": "done",
+        "result_text": result_text,
+    }
+    auto_assistant_mid = await insert_message(
         db,
         organization_id=organization_id,
         user_id=user_id,
         session_id=session_id,
         role="assistant",
-        content=exec_record,
+        content=f"_tool_call_completed:{tool_name}_",
+        tool_call=auto_tc,
         attachments=att,
     )
     await insert_message(
@@ -2700,7 +2996,11 @@ async def _auto_execute_single_tool_sse(
             "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments."
         ),
     }
-    follow_msgs = list(snapshot) + [summarize_system, tool_result_llm_message(result_text, tool_name)]
+    follow_msgs = (
+        list(snapshot)
+        + [summarize_system]
+        + assistant_and_tool_result_pair(tool_name, args, result_text, call_id=str(auto_assistant_mid))
+    )
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -2867,7 +3167,11 @@ async def stream_follow_up_after_tool(
                     rest = payload[len("[TOOL_CALL_BATCH_PENDING]") :].strip()
                     try:
                         envelope = json.loads(rest)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as _je:
+                        logger.error(
+                            "stream_follow_up_after_tool: malformed TOOL_CALL_BATCH_PENDING JSON: %s; payload=%r",
+                            _je, rest[:200],
+                        )
                         envelope = {}
                     calls = envelope.get("calls") if isinstance(envelope.get("calls"), list) else []
                     calls = filter_tool_batch_calls(
@@ -2931,7 +3235,11 @@ async def stream_follow_up_after_tool(
                     rest = payload[len("[TOOL_CALL_PENDING]") :].strip()
                     try:
                         pending_data = json.loads(rest)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as _je:
+                        logger.error(
+                            "stream_follow_up_after_tool: malformed TOOL_CALL_PENDING JSON: %s; payload=%r",
+                            _je, rest[:200],
+                        )
                         pending_data = {}
                     tool_name = str(pending_data.get("tool_name") or "")
                     args = (
