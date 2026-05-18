@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -78,6 +78,53 @@ from app.services.agent_client import (
 from app.services.organization_tools import get_disabled_tool_names
 
 logger = logging.getLogger(__name__)
+
+_SSE_KEEPALIVE_SECONDS = 15.0
+
+
+async def _detached_sse(source: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Stream chunks to the browser while letting the producer finish after disconnect.
+
+    Long tool runs must persist their terminal state and follow-up assistant message even
+    when a browser, proxy, or tab drops the HTTP stream. This wrapper decouples the
+    response consumer from the work producer: once started, the source iterator is
+    drained to completion; if the client disconnects, later chunks are discarded but the
+    DB writes inside the source still happen.
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    active = True
+
+    async def produce() -> None:
+        nonlocal active
+        try:
+            async for chunk in source:
+                if active:
+                    queue.put_nowait(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("agent_chat detached SSE producer failed")
+            if active:
+                queue.put_nowait(f"data: [ERROR] {exc}\n\n")
+        finally:
+            if active:
+                queue.put_nowait(None)
+
+    asyncio.create_task(produce())
+
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        active = False
+
 
 router = APIRouter(prefix="/workspace/agent-chat", tags=["agent-chat"])
 
@@ -473,7 +520,7 @@ async def post_message_stream(
             yield f"data: [ERROR] {e.message}\n\n"
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
+    return StreamingResponse(_detached_sse(gen()), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
 
 
 @router.patch("/sessions/{session_id}/messages/{message_id}/tool-decisions")
@@ -538,7 +585,7 @@ async def post_tool_batch_execute_stream(
             yield f"data: [ERROR] {e.message}\n\n"
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
+    return StreamingResponse(_detached_sse(gen()), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
 
 
 @router.post("/sessions/{session_id}/tool-confirm")
@@ -864,4 +911,4 @@ async def tool_confirm_stream(
             yield f"data: [ERROR] {e.message}\n\n"
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
+    return StreamingResponse(_detached_sse(gen()), media_type="text/event-stream", headers=_AGENT_CHAT_SSE_HEADERS)
