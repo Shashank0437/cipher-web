@@ -448,7 +448,11 @@ export function DashboardSessionsHome() {
                             type="button"
                             disabled={reportBusy}
                             onClick={() => handleReportAction(r)}
-                            className="rounded-lg p-2 hover:bg-primary-container hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            className={`rounded-lg p-2 hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-40 ${
+                              reportAttachment
+                                ? "text-emerald-700 hover:text-emerald-800"
+                                : "text-primary hover:text-primary"
+                            }`}
                             title={
                               reportBusy
                                 ? "Generating PDF report…"
@@ -458,11 +462,22 @@ export function DashboardSessionsHome() {
                             }
                           >
                             <MaterialSymbol
-                              name={reportBusy ? "progress_activity" : "picture_as_pdf"}
+                              name={reportBusy ? "progress_activity" : reportAttachment ? "picture_as_pdf" : "note_add"}
                               className={reportBusy ? "animate-spin" : ""}
                               filled
                             />
                           </button>
+                          {reportAttachment ? (
+                            <button
+                              type="button"
+                              disabled={reportBusy}
+                              onClick={() => generateReport(r)}
+                              className="rounded-lg p-2 text-primary hover:bg-primary-container hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                              title="Regenerate PDF report"
+                            >
+                              <MaterialSymbol name="published_with_changes" filled />
+                            </button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>
@@ -543,7 +558,13 @@ export function DashboardSessionsHome() {
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-[12px] font-bold text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <MaterialSymbol
-                    name={reportBusyId === selected.session_id ? "progress_activity" : "picture_as_pdf"}
+                    name={
+                      reportBusyId === selected.session_id
+                        ? "progress_activity"
+                        : latestReportAttachment(selected)
+                          ? "picture_as_pdf"
+                          : "note_add"
+                    }
                     className={`text-base text-on-primary ${reportBusyId === selected.session_id ? "animate-spin" : ""}`}
                     filled
                   />
@@ -560,7 +581,7 @@ export function DashboardSessionsHome() {
                     onClick={() => generateReport(selected)}
                     className="inline-flex items-center gap-2 rounded-lg border border-outline-variant px-3 py-2 text-[12px] font-bold text-on-surface hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <MaterialSymbol name="picture_as_pdf" className="text-base" filled />
+                    <MaterialSymbol name="published_with_changes" className="text-base" filled />
                     Regenerate PDF
                   </button>
                 ) : null}
