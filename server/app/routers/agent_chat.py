@@ -36,6 +36,7 @@ from app.services.agent_chat import (
     _agent_chat_skip_tool_approval_prompt,
     _looks_like_contextual_tool_follow_up,
     assistant_and_tool_result_pair,
+    PENETRATION_REPORT_TOOL_NAME,
     message_references_pronoun_target,
     recent_target_from_rows,
     target_from_text,
@@ -369,6 +370,110 @@ async def download_agent_chat_attachment(
         media_type=ct,
         headers={"Content-Disposition": f'attachment; filename="{fn}"'},
     )
+
+
+@router.post("/sessions/{session_id}/report")
+async def generate_agent_chat_session_report(
+    session_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    settings = get_settings()
+    sid = _oid(session_id)
+    sess = await get_session_owned(
+        db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid
+    )
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    intel = sess.get("session_intelligence") if isinstance(sess.get("session_intelligence"), dict) else {}
+    targets = intel.get("targets") if isinstance(intel, dict) else []
+    title = str(intel.get("title") or sess.get("title") or "").strip() if isinstance(intel, dict) else ""
+    target_label = str(targets[0]).strip() if isinstance(targets, list) and targets else ""
+    args: dict[str, Any] = {
+        "client_name": title,
+        "target_label": target_label,
+        "generated_by": "CipherStrike",
+    }
+    started_at = _utc_now_iso()
+
+    try:
+        result_text, meta, http_status = await _run_one_tool_detailed(
+            settings,
+            "/api/intelligence/penetration-report",
+            args,
+            chat_tool_context=(db, user["organization_id"], user["_id"], sid),
+            enrichment_tool_name=PENETRATION_REPORT_TOOL_NAME,
+        )
+    except AgentUnreachableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("agent_chat: session report generation failed")
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    attachments = attachments_from_tool_result_json(result_text) or []
+    tool_call = {
+        "state": "confirmed" if attachments and http_status < 400 else "error",
+        "tool_name": PENETRATION_REPORT_TOOL_NAME,
+        "arguments": args,
+        "endpoint": "/api/intelligence/penetration-report",
+        "description": "Generate a penetration testing PDF report for this session.",
+        "result_text": result_text,
+        "run_started_at": started_at,
+        **meta,
+    }
+    await insert_message(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        role="assistant",
+        content=f"_tool_call_completed:{PENETRATION_REPORT_TOOL_NAME}_",
+        tool_call=tool_call,
+        attachments=attachments or None,
+    )
+    await insert_message(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        role="tool",
+        content=result_text,
+        tool_name=PENETRATION_REPORT_TOOL_NAME,
+    )
+
+    if not attachments or http_status >= 400:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="PDF report generation did not return an attachment.",
+        )
+
+    existing_report = intel.get("report_metadata") if isinstance(intel, dict) else {}
+    existing_attachments = (
+        existing_report.get("attachments")
+        if isinstance(existing_report, dict) and isinstance(existing_report.get("attachments"), list)
+        else []
+    )
+    merged: dict[str, dict[str, Any]] = {}
+    for raw in [*existing_attachments, *attachments]:
+        if isinstance(raw, dict) and raw.get("id"):
+            merged[str(raw["id"])] = raw
+    report_metadata = {
+        "available": True,
+        "attachments": list(merged.values()),
+        "latest_attachment": attachments[-1],
+        "generated_at": _utc_now_iso(),
+        "regenerable": True,
+    }
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": sid, "organization_id": user["organization_id"], "user_id": user["_id"]},
+        {"$set": {"session_intelligence.report_metadata": report_metadata, "updated_at": _utc_now_iso()}},
+    )
+    return {
+        "session_id": str(sid),
+        "attachment": attachments[-1],
+        "report_metadata": report_metadata,
+    }
 
 
 @router.post("/sessions/{session_id}/messages")

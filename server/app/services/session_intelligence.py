@@ -189,7 +189,11 @@ def _iter_tool_slots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row_created = iso(row.get("created_at"))
         tc = row.get("tool_call")
         if isinstance(tc, dict):
-            slots.append({**tc, "_message_id": str(row.get("_id") or ""), "_message_created_at": row_created})
+            row_attachments = row.get("attachments")
+            slot = {**tc, "_message_id": str(row.get("_id") or ""), "_message_created_at": row_created}
+            if isinstance(row_attachments, list) and "attachments" not in slot:
+                slot["attachments"] = row_attachments
+            slots.append(slot)
         tcs = row.get("tool_calls")
         if isinstance(tcs, list):
             for slot in tcs:

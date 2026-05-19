@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MaterialSymbol } from "@/components/ui/MaterialSymbol";
 import {
+  downloadAgentChatAttachment,
+  generateAgentChatSessionReport,
   listAgentChatSessionIntelligence,
+  type AgentChatAttachment,
   type AgentChatFindingSeverity,
   type AgentChatSessionIntelligence,
   type AgentChatSessionStatus,
@@ -59,12 +62,37 @@ function severityChips(row: AgentChatSessionIntelligence): string[] {
   });
 }
 
-function replayAvailable(row: AgentChatSessionIntelligence): boolean {
-  return Boolean(row.replay_metadata?.available);
-}
-
 function reportAvailable(row: AgentChatSessionIntelligence): boolean {
   return Boolean(row.report_metadata?.available || row.findings.length > 0 || row.summary);
+}
+
+function latestReportAttachment(row: AgentChatSessionIntelligence): AgentChatAttachment | null {
+  const latest = row.report_metadata?.latest_attachment;
+  if (latest && typeof latest === "object") {
+    const a = latest as Record<string, unknown>;
+    if (typeof a.id === "string" && typeof a.filename === "string") {
+      return {
+        id: a.id,
+        filename: a.filename,
+        content_type: typeof a.content_type === "string" ? a.content_type : "application/pdf",
+      };
+    }
+  }
+  const attachments = row.report_metadata?.attachments;
+  if (!Array.isArray(attachments)) return null;
+  for (let i = attachments.length - 1; i >= 0; i--) {
+    const raw = attachments[i];
+    if (!raw || typeof raw !== "object") continue;
+    const a = raw as Record<string, unknown>;
+    if (typeof a.id === "string" && typeof a.filename === "string") {
+      return {
+        id: a.id,
+        filename: a.filename,
+        content_type: typeof a.content_type === "string" ? a.content_type : "application/pdf",
+      };
+    }
+  }
+  return null;
 }
 
 function sortRows(
@@ -88,6 +116,8 @@ export function DashboardSessionsHome() {
   const [severityFilter, setSeverityFilter] = useState<AgentChatFindingSeverity | "ALL">("ALL");
   const [sortMode, setSortMode] = useState<"newest" | "oldest">("newest");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reportBusyId, setReportBusyId] = useState<string | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   async function load(silent = false) {
     if (!silent) setLoading(true);
@@ -108,6 +138,48 @@ export function DashboardSessionsHome() {
     const timer = window.setInterval(() => load(true), 5000);
     return () => window.clearInterval(timer);
   }, []);
+
+  async function downloadReport(sessionId: string, attachment: AgentChatAttachment) {
+    const { blob, filename } = await downloadAgentChatAttachment(sessionId, attachment.id);
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || attachment.filename || "penetration-report.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  }
+
+  async function generateReport(row: AgentChatSessionIntelligence, { downloadAfter = false } = {}) {
+    setReportBusyId(row.session_id);
+    setReportError(null);
+    try {
+      const result = await generateAgentChatSessionReport(row.session_id);
+      await load(true);
+      if (downloadAfter && result.attachment) {
+        await downloadReport(row.session_id, result.attachment);
+      }
+    } catch (e) {
+      setReportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReportBusyId(null);
+    }
+  }
+
+  async function handleReportAction(row: AgentChatSessionIntelligence) {
+    const attachment = latestReportAttachment(row);
+    setReportError(null);
+    if (attachment) {
+      try {
+        await downloadReport(row.session_id, attachment);
+      } catch (e) {
+        setReportError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    await generateReport(row);
+  }
 
   const metrics = useMemo(() => {
     const totalSessions = rows.length;
@@ -276,6 +348,11 @@ export function DashboardSessionsHome() {
             {error}
           </div>
         ) : null}
+        {reportError ? (
+          <div className="border-b border-outline-variant px-5 py-3 text-[13px] font-semibold text-red-700">
+            {reportError}
+          </div>
+        ) : null}
 
         <div className="overflow-x-auto">
           <table className="min-w-[760px] w-full border-collapse text-left text-[14px]">
@@ -317,6 +394,8 @@ export function DashboardSessionsHome() {
               ) : (
                 filteredRows.map((r) => {
                   const chips = severityChips(r);
+                  const reportAttachment = latestReportAttachment(r);
+                  const reportBusy = reportBusyId === r.session_id;
                   return (
                     <tr key={r.session_id} className="border-b border-outline-variant/80 hover:bg-primary-container/[0.12]">
                       <td className="px-5 py-4">
@@ -367,11 +446,22 @@ export function DashboardSessionsHome() {
                           </Link>
                           <button
                             type="button"
-                            disabled={!replayAvailable(r)}
+                            disabled={reportBusy}
+                            onClick={() => handleReportAction(r)}
                             className="rounded-lg p-2 hover:bg-primary-container hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                            title={replayAvailable(r) ? "Replay" : "Replay metadata unavailable"}
+                            title={
+                              reportBusy
+                                ? "Generating PDF report…"
+                                : reportAttachment
+                                  ? "Download PDF report"
+                                  : "Generate PDF report"
+                            }
                           >
-                            <MaterialSymbol name="replay" filled />
+                            <MaterialSymbol
+                              name={reportBusy ? "progress_activity" : "picture_as_pdf"}
+                              className={reportBusy ? "animate-spin" : ""}
+                              filled
+                            />
                           </button>
                         </div>
                       </td>
@@ -445,6 +535,36 @@ export function DashboardSessionsHome() {
               <p className="mt-2 text-[13px] text-on-surface-variant">
                 Breach time {selected.average_time_to_breach} · Updated {formatDate(selected.updated_at)}
               </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={reportBusyId === selected.session_id}
+                  onClick={() => handleReportAction(selected)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-[12px] font-bold text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <MaterialSymbol
+                    name={reportBusyId === selected.session_id ? "progress_activity" : "picture_as_pdf"}
+                    className={`text-base text-on-primary ${reportBusyId === selected.session_id ? "animate-spin" : ""}`}
+                    filled
+                  />
+                  {reportBusyId === selected.session_id
+                    ? "Generating PDF…"
+                    : latestReportAttachment(selected)
+                      ? "Download PDF"
+                      : "Generate PDF"}
+                </button>
+                {latestReportAttachment(selected) ? (
+                  <button
+                    type="button"
+                    disabled={reportBusyId === selected.session_id}
+                    onClick={() => generateReport(selected)}
+                    className="inline-flex items-center gap-2 rounded-lg border border-outline-variant px-3 py-2 text-[12px] font-bold text-on-surface hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <MaterialSymbol name="picture_as_pdf" className="text-base" filled />
+                    Regenerate PDF
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
 

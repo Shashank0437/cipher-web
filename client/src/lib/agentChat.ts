@@ -265,6 +265,19 @@ export async function getAgentChatSessionIntelligence(sessionId: string): Promis
   return JSON.parse(text) as AgentChatSessionIntelligence;
 }
 
+export async function generateAgentChatSessionReport(
+  sessionId: string,
+): Promise<{ attachment?: AgentChatAttachment; report_metadata?: Record<string, unknown> }> {
+  const res = await fetch(`${getApiBase()}${PREFIX}/sessions/${sessionId}/report`, {
+    method: "POST",
+    headers: bearerHeaders(true),
+    body: "{}",
+  });
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  return JSON.parse(text) as { attachment?: AgentChatAttachment; report_metadata?: Record<string, unknown> };
+}
+
 export async function createAgentChatSession(title = ""): Promise<AgentChatSession> {
   const res = await fetch(`${getApiBase()}${PREFIX}/sessions`, {
     method: "POST",
