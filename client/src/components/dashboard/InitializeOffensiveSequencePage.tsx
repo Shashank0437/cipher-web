@@ -941,7 +941,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const attachStreamHandlers = useCallback(
     (sessionId: string) => (ev: AgentChatSseEvent) => {
       if (ev.type === "thinking") {
-        setReasoningStreaming(true);
         if (reasoningStartedAtRef.current === null) reasoningStartedAtRef.current = performance.now();
         return;
       }
@@ -1101,7 +1100,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       setIsSending(true);
       setPinnedToBottom(true);
       clearLiveStreamState();
-      setReasoningStreaming(true);
       reasoningStartedAtRef.current = performance.now();
       setOptimisticMessages([
         {
