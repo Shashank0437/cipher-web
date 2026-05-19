@@ -1166,6 +1166,57 @@ def assistant_and_tool_result_pair(
     ]
 
 
+def _fallback_post_tool_summary(llm_messages: list[dict[str, Any]], reason: str = "") -> str:
+    """Local post-tool summary when the follow-up LLM stream fails after tools completed."""
+    tool_rows = [
+        m for m in llm_messages
+        if isinstance(m, dict) and str(m.get("role") or "") == "tool"
+    ]
+    names: list[str] = []
+    notes: list[str] = []
+    for m in tool_rows[-8:]:
+        name = str(m.get("name") or m.get("tool_name") or "tool").strip() or "tool"
+        if name not in names:
+            names.append(name)
+        content = str(m.get("content") or "")
+        note = ""
+        try:
+            obj = json.loads(content)
+            if isinstance(obj, dict):
+                if obj.get("error"):
+                    note = f"{name}: {str(obj.get('error'))[:180]}"
+                else:
+                    summary = obj.get("_llm_summary")
+                    if isinstance(summary, dict):
+                        bits = []
+                        for key in ("status", "success", "exit_code", "stdout_nonempty_lines"):
+                            if summary.get(key) is not None:
+                                bits.append(f"{key}={summary.get(key)}")
+                        if bits:
+                            note = f"{name}: " + ", ".join(bits)
+                    if not note:
+                        raw = obj.get("raw") or obj.get("stdout") or obj.get("result") or obj.get("output")
+                        if raw:
+                            note = f"{name}: {str(raw)[:180]}"
+        except Exception:
+            compact = re.sub(r"\s+", " ", content).strip()
+            if compact:
+                note = f"{name}: {compact[:180]}"
+        if note:
+            notes.append(note)
+
+    tool_label = ", ".join(names) if names else "The completed tool run"
+    text = (
+        f"{tool_label} finished and the execution details were saved to the session. "
+        "The automatic follow-up summary could not be generated because the LLM stream disconnected."
+    )
+    if notes:
+        text += " Latest persisted result snapshot: " + " | ".join(notes[:4])
+    if reason:
+        text += f" Follow-up error: {reason[:220]}"
+    return text
+
+
 # Regex strips legacy assistant messages that embedded the executed-tool markdown.
 # The fence may be three or four backticks; allow any opener of >= 3 of the same character.
 _LEGACY_TOOL_EXECUTED_MARKDOWN_RE = re.compile(
@@ -1621,6 +1672,15 @@ def recent_target_from_rows(rows: list[dict[str, Any]] | None, *, current_user_m
         hit = _try_extract(content)
         if hit:
             return hit
+    return ""
+
+
+def target_from_text(text: str) -> str:
+    for match in _TARGET_HINT_RE.finditer(text or ""):
+        tok = _clean_target_token(match.group(0))
+        if not tok or tok.lower() in {"e.g", "i.e"}:
+            continue
+        return tok
     return ""
 
 
@@ -3267,6 +3327,31 @@ async def stream_follow_up_after_tool(
         assistant_chunks.clear()
         thinking_chunks.clear()
 
+    async def _persist_and_stream_fallback(reason: str) -> AsyncIterator[str]:
+        text = _fallback_post_tool_summary(llm_messages, reason)
+        await insert_message(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            role="assistant",
+            content=text,
+            thinking_content="".join(thinking_chunks).strip() or None,
+            routing=routing,
+        )
+        await recalculate_session_intelligence(
+            settings,
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            use_ai=False,
+        )
+        for i in range(0, len(text), 96):
+            yield f"data: {json.dumps(text[i:i + 96])}\n\n"
+            await _sse_flush_tick()
+        yield "data: [DONE]\n\n"
+
     try:
         async for text_chunk in agent_post_sse_stream(
             settings,
@@ -3477,23 +3562,9 @@ async def stream_follow_up_after_tool(
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
                     err_txt = payload[7:].lstrip()
-                    await insert_message(
-                        db,
-                        organization_id=organization_id,
-                        user_id=user_id,
-                        session_id=session_id,
-                        role="assistant",
-                        content=f"[Error] {err_txt}",
-                        thinking_content="".join(thinking_chunks) or None,
-                    )
-                    await recalculate_session_intelligence(
-                        settings,
-                        db,
-                        organization_id=organization_id,
-                        user_id=user_id,
-                        session_id=session_id,
-                        use_ai=False,
-                    )
+                    async for fallback_chunk in _persist_and_stream_fallback(err_txt):
+                        yield fallback_chunk
+                    return
                 elif payload.startswith("[THINK_TOKEN]"):
                     rest = payload[len("[THINK_TOKEN]") :].strip()
                     piece = _parse_think_token_payload(rest)
@@ -3540,5 +3611,5 @@ async def stream_follow_up_after_tool(
             # generator, or legacy agent). Unblock the UI so it stops showing "Agent is working".
             yield "data: [DONE]\n\n"
     except AgentUnreachableError as e:
-        yield f"data: [ERROR] {e.message}\n\n"
-        yield "data: [DONE]\n\n"
+        async for fallback_chunk in _persist_and_stream_fallback(e.message):
+            yield fallback_chunk

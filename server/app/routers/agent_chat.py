@@ -38,6 +38,7 @@ from app.services.agent_chat import (
     assistant_and_tool_result_pair,
     message_references_pronoun_target,
     recent_target_from_rows,
+    target_from_text,
     infer_retry_rejected_tool_names,
     looks_like_retry_rejected_tools,
     retry_rejected_tools_system_note,
@@ -467,7 +468,8 @@ async def post_message_stream(
             # Short-circuit: pronoun reference (same/this/that/it/the target) WITHOUT a
             # resolvable target in the conversation history → ask the user to specify, do
             # NOT call the LLM (it will produce empty responses or hallucinate).
-            if message_references_pronoun_target(user_msg) and not explicit_arg:
+            current_target = target_from_text(user_msg)
+            if message_references_pronoun_target(user_msg) and not explicit_arg and not current_target:
                 _recent_target = recent_target_from_rows(rows, current_user_message=user_msg)
                 if not _recent_target:
                     ask_text = (
