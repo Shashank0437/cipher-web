@@ -77,8 +77,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_LLM_STREAM_TIMEOUT_SECONDS"),
     )
 
-    # Router for /workspace/agent-chat — max tool names route-intent may bind → schemas for main LLM (≤24).
-    agent_router_max_tools: int = Field(default=16, ge=1, le=24)
+    # Router for /workspace/agent-chat — max tool names route-intent may bind → schemas for main LLM.
+    agent_router_max_tools: int = Field(default=30, ge=1, le=30)
 
     # Rolling summary: when non-zero, summarize older turns once thread exceeds this message count (Mongo session doc).
     agent_chat_summarize_after_messages: int = Field(default=0, ge=0, le=500)
