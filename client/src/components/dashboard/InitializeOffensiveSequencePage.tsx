@@ -1055,6 +1055,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         delete rest.message_id;
         const key = `${mid}-${si}`;
         const rs = String(rest.run_status ?? "").toLowerCase();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === mid && m.batch_execution_state === "awaiting_quorum"
+              ? { ...m, batch_execution_state: "executing" }
+              : m,
+          ),
+        );
         setLiveBatchSlotOverlay((prev) => ({
           ...prev,
           [key]: { ...prev[key], ...(rest as Partial<AgentChatBatchSlot>) },
@@ -1256,6 +1263,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setStreamReasoning("");
         setReasoningStreaming(false);
         resetThoughtClock();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId && m.batch_execution_state === "awaiting_quorum"
+              ? { ...m, batch_execution_state: "executing" }
+              : m,
+          ),
+        );
 
         await streamAgentChatToolBatchExecute(selectedSessionId, assistantMessageId, {
           signal: ac.signal,
