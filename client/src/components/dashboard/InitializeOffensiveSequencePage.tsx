@@ -77,59 +77,6 @@ function formatChatError(err: unknown): string {
   return "Something went wrong.";
 }
 
-/** Hide tool-role messages whose content is already represented by the preceding assistant message.
- *
- * Two cases:
- *   - Legacy: previous assistant has "[Tool executed: …]" markdown content with embedded JSON.
- *   - New format: previous assistant has tool_call.state="confirmed" with result_text that matches
- *     the tool content. We do NOT dedup rejected/blocked states — those tool messages carry the
- *     operator-visible "operator chose not to run" / "tool blocked" text that the card doesn't show.
- */
-function isRedundantToolResultEcho(
-  previousMessage: AgentChatMessage | undefined,
-  toolMessage: AgentChatMessage,
-): boolean {
-  if (!previousMessage || previousMessage.role !== "assistant") return false;
-  const toolContent = (toolMessage.content ?? "").trim();
-  const toolName = (toolMessage.tool_name ?? "").trim().toLowerCase();
-
-  // New format: only dedup when state is confirmed AND the assistant's stored result_text
-  // matches the tool content. Rejected / blocked tool messages stay visible.
-  const tc = previousMessage.tool_call as
-    | { tool_name?: unknown; state?: unknown; result_text?: unknown }
-    | null
-    | undefined;
-  if (tc && typeof tc === "object") {
-    const tcName = String(tc.tool_name ?? "").trim().toLowerCase();
-    const tcState = String(tc.state ?? "").trim().toLowerCase();
-    const tcResult = String(tc.result_text ?? "").trim();
-    if (
-      tcState === "confirmed" &&
-      tcName &&
-      (!toolName || toolName === tcName) &&
-      tcResult &&
-      tcResult === toolContent
-    ) {
-      return true;
-    }
-  }
-
-  // Legacy: stringified markdown content with embedded JSON fence.
-  const prev = previousMessage.content ?? "";
-  if (prev.includes("[Tool executed:")) {
-    const embedded = extractToolResultJsonFromExecContent(prev);
-    if (embedded != null) {
-      if (embedded === toolContent) return true;
-      try {
-        return JSON.stringify(JSON.parse(embedded)) === JSON.stringify(JSON.parse(toolContent));
-      } catch {
-        return false;
-      }
-    }
-  }
-  return false;
-}
-
 /** LLM follow-up sometimes pastes the same raw tool JSON as its own assistant message — hide that duplicate bubble. */
 function getLatestToolJsonPayloadBefore(messages: AgentChatMessage[], beforeIdx: number): string | null {
   for (let j = beforeIdx - 1; j >= 0; j--) {
@@ -1509,7 +1456,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     <p className="text-[13px] text-on-surface-variant">Loading messages…</p>
                   ) : null}
                   {visibleMessages.map((m, idx) => {
-                    if (m.role === "tool" && isRedundantToolResultEcho(visibleMessages[idx - 1], m)) {
+                    if (m.role === "tool") {
                       return null;
                     }
                     if (m.role === "assistant" && isEchoAssistantToolJsonDuplicate(visibleMessages, idx)) {
