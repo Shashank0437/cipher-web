@@ -23,6 +23,7 @@ from app.schemas.agent_chat import (
     AgentChatOrgToolRow,
     AgentChatOrgToolsOut,
     AgentChatSendBody,
+    AgentChatSessionIntelligenceOut,
     AgentChatSessionCreate,
     AgentChatSessionOut,
     AgentChatSessionPatch,
@@ -75,6 +76,7 @@ from app.services.agent_client import (
     agent_path_not_allowed,
     normalize_agent_tool_path,
 )
+from app.services.session_intelligence import list_session_intelligence, recalculate_session_intelligence
 from app.services.organization_tools import get_disabled_tool_names
 
 logger = logging.getLogger(__name__)
@@ -235,6 +237,41 @@ async def list_chat_sessions(
 ) -> list[AgentChatSessionOut]:
     rows = await list_sessions(db, organization_id=user["organization_id"], user_id=user["_id"])
     return [_session_out(d) for d in rows]
+
+
+@router.get("/session-intelligence", response_model=list[AgentChatSessionIntelligenceOut])
+async def list_chat_session_intelligence(
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[AgentChatSessionIntelligenceOut]:
+    rows = await list_session_intelligence(db, organization_id=user["organization_id"], user_id=user["_id"])
+    return [AgentChatSessionIntelligenceOut(**r) for r in rows]
+
+
+@router.get("/sessions/{session_id}/intelligence", response_model=AgentChatSessionIntelligenceOut)
+async def get_chat_session_intelligence(
+    session_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AgentChatSessionIntelligenceOut:
+    sid = _oid(session_id)
+    sess = await get_session_owned(db, organization_id=user["organization_id"], user_id=user["_id"], session_id=sid)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+    intel = sess.get("session_intelligence")
+    if not isinstance(intel, dict):
+        settings = get_settings()
+        intel = await recalculate_session_intelligence(
+            settings,
+            db,
+            organization_id=user["organization_id"],
+            user_id=user["_id"],
+            session_id=sid,
+            use_ai=False,
+        )
+    if not isinstance(intel, dict):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session intelligence not found")
+    return AgentChatSessionIntelligenceOut(**intel)
 
 
 @router.patch("/sessions/{session_id}", response_model=AgentChatSessionOut)
@@ -885,6 +922,14 @@ async def tool_confirm_stream(
             await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one(
                 {"_id": aid},
                 {"$set": tool_call_updates},
+            )
+            await recalculate_session_intelligence(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+                use_ai=False,
             )
 
             yield _sse_tool_batch_slot_progress(

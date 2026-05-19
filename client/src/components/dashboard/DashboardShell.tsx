@@ -27,13 +27,14 @@ const MAIN_NAV: NavMain[] = [
     match: "prefix",
     adminOnly: true,
   },
-  {
-    href: "/dashboard/analytics",
-    label: "Analytics",
-    icon: "analytics",
-    match: "prefix",
-    adminOnly: true,
-  },
+  // Analytics is hidden from the dashboard sidebar until the feature is ready.
+  // {
+  //   href: "/dashboard/analytics",
+  //   label: "Analytics",
+  //   icon: "analytics",
+  //   match: "prefix",
+  //   adminOnly: true,
+  // },
   {
     href: "/dashboard/users",
     label: "User management",

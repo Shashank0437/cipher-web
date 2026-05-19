@@ -28,6 +28,26 @@ class AgentChatSessionOut(BaseModel):
     updated_at: datetime
 
 
+class AgentChatSessionIntelligenceOut(BaseModel):
+    session_id: str
+    title: str
+    status: Literal["IN_PROGRESS", "COMPLETED", "FAILED"]
+    summary: str
+    average_time_to_breach: str
+    average_time_to_breach_seconds: int = 0
+    total_scans: int = 1
+    findings_count: dict[str, int]
+    findings: list[dict[str, Any]]
+    tools_used: list[str]
+    timeline: list[dict[str, Any]]
+    targets: list[str]
+    started_at: str
+    updated_at: str
+    completed_at: str | None = None
+    replay_metadata: dict[str, Any] = Field(default_factory=dict)
+    report_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentChatOrgToolRow(BaseModel):
     """Tool enabled for agent chat for this org, reported installed on the agent host (not org-disabled, not chat-blocklisted)."""
 

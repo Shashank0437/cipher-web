@@ -10,6 +10,55 @@ export type AgentChatSession = {
   updated_at: string;
 };
 
+export type AgentChatSessionStatus = "IN_PROGRESS" | "COMPLETED" | "FAILED";
+
+export type AgentChatFindingSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+
+export type AgentChatSessionFinding = {
+  id: string;
+  name: string;
+  severity: AgentChatFindingSeverity;
+  details: string;
+  source_tool: string;
+  affected_target: string;
+  evidence: string;
+  first_seen: string;
+};
+
+export type AgentChatSessionTimelineEvent = {
+  timestamp: string;
+  type: string;
+  title: string;
+  details: string;
+};
+
+export type AgentChatSessionIntelligence = {
+  session_id: string;
+  title: string;
+  status: AgentChatSessionStatus;
+  summary: string;
+  average_time_to_breach: string;
+  average_time_to_breach_seconds?: number;
+  total_scans: number;
+  findings_count: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    info: number;
+    total: number;
+  };
+  findings: AgentChatSessionFinding[];
+  tools_used: string[];
+  timeline: AgentChatSessionTimelineEvent[];
+  targets: string[];
+  started_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  replay_metadata?: Record<string, unknown>;
+  report_metadata?: Record<string, unknown>;
+};
+
 export type AgentChatToolCallState = {
   state?: string;
   tool_name?: string;
@@ -198,6 +247,22 @@ export async function listAgentChatSessions(): Promise<AgentChatSession[]> {
   const text = await res.text();
   if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
   return JSON.parse(text) as AgentChatSession[];
+}
+
+export async function listAgentChatSessionIntelligence(): Promise<AgentChatSessionIntelligence[]> {
+  const res = await fetch(`${getApiBase()}${PREFIX}/session-intelligence`, { headers: bearerHeaders() });
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  return JSON.parse(text) as AgentChatSessionIntelligence[];
+}
+
+export async function getAgentChatSessionIntelligence(sessionId: string): Promise<AgentChatSessionIntelligence> {
+  const res = await fetch(`${getApiBase()}${PREFIX}/sessions/${sessionId}/intelligence`, {
+    headers: bearerHeaders(),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  return JSON.parse(text) as AgentChatSessionIntelligence;
 }
 
 export async function createAgentChatSession(title = ""): Promise<AgentChatSession> {

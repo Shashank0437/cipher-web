@@ -34,6 +34,7 @@ from app.services.agent_client import (
     normalize_agent_tool_path,
     tool_installed_from_agent_health,
 )
+from app.services.session_intelligence import recalculate_session_intelligence
 from app.services.tool_run_stream import drain_tool_run_stream
 
 logger = logging.getLogger(__name__)
@@ -2905,6 +2906,14 @@ async def execute_tool_slots_follow_up(
             {"$set": {"batch_execution_state": "completed", "tool_calls": updated_slots}},
         )
         await touch_session(db, session_id)
+        await recalculate_session_intelligence(
+            settings,
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            use_ai=False,
+        )
 
     # Strip ALL tools that just ran/were-rejected from follow-up schemas + nudge to summarize.
     ran_tool_names_lower = {
@@ -3078,6 +3087,14 @@ async def _auto_execute_single_tool_sse(
         role="tool",
         content=result_text,
         tool_name=tool_name,
+    )
+    await recalculate_session_intelligence(
+        settings,
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+        use_ai=False,
     )
 
     # Strip the just-executed tool from follow-up schemas + nudge model to summarize.
@@ -3449,6 +3466,14 @@ async def stream_follow_up_after_tool(
                                 content=full_text,
                                 thinking_content=think_txt,
                             )
+                            await recalculate_session_intelligence(
+                                settings,
+                                db,
+                                organization_id=organization_id,
+                                user_id=user_id,
+                                session_id=session_id,
+                                use_ai=True,
+                            )
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
                     err_txt = payload[7:].lstrip()
@@ -3460,6 +3485,14 @@ async def stream_follow_up_after_tool(
                         role="assistant",
                         content=f"[Error] {err_txt}",
                         thinking_content="".join(thinking_chunks) or None,
+                    )
+                    await recalculate_session_intelligence(
+                        settings,
+                        db,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        use_ai=False,
                     )
                 elif payload.startswith("[THINK_TOKEN]"):
                     rest = payload[len("[THINK_TOKEN]") :].strip()
@@ -3492,6 +3525,14 @@ async def stream_follow_up_after_tool(
                         role="assistant",
                         content=full_text,
                         thinking_content=think_txt,
+                    )
+                    await recalculate_session_intelligence(
+                        settings,
+                        db,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        use_ai=True,
                     )
             yield "data: [DONE]\n\n"
         elif not seen_done:
