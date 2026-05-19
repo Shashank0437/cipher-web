@@ -217,6 +217,65 @@ function mergeBatchSlotOverlay(
   return row ? { ...slot, ...row } : slot;
 }
 
+function isTerminalRunStatus(status: unknown): boolean {
+  const rs = String(status ?? "").toLowerCase();
+  return rs === "done" || rs === "error" || rs === "skipped";
+}
+
+function messageHasRunningTool(m: AgentChatMessage): boolean {
+  if (m.role !== "assistant") return false;
+  const tcStatus = String(m.tool_call?.run_status ?? "").toLowerCase();
+  if (tcStatus === "running" || tcStatus === "queued") return true;
+  if (String(m.batch_execution_state ?? "").toLowerCase() === "executing") return true;
+  const slots = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+  return slots.some((s) => {
+    const rs = String(s.run_status ?? "").toLowerCase();
+    return rs === "running" || rs === "queued";
+  });
+}
+
+function messageAwaitsToolFollowUp(rows: AgentChatMessage[], index: number): boolean {
+  const m = rows[index];
+  if (m.role !== "assistant") return false;
+  const singleDone = m.tool_call?.state === "confirmed" || isTerminalRunStatus(m.tool_call?.run_status);
+  const batchDone = String(m.batch_execution_state ?? "").toLowerCase() === "completed";
+  if (!singleDone && !batchDone) return false;
+  return !rows.slice(index + 1).some((next) => next.role === "assistant" && (next.content ?? "").trim());
+}
+
+function shouldPollMessages(rows: AgentChatMessage[]): boolean {
+  return rows.some(messageHasRunningTool) || rows.some((_, i) => messageAwaitsToolFollowUp(rows, i));
+}
+
+function pruneTerminalOverlays(
+  overlay: Record<string, Partial<AgentChatBatchSlot>>,
+  rows: AgentChatMessage[],
+): Record<string, Partial<AgentChatBatchSlot>> {
+  let changed = false;
+  const next = { ...overlay };
+  for (const m of rows) {
+    if (m.role !== "assistant") continue;
+    if (m.tool_call && isTerminalRunStatus(m.tool_call.run_status)) {
+      const key = `${m.id}-0`;
+      if (next[key]) {
+        delete next[key];
+        changed = true;
+      }
+    }
+    const slots = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+    slots.forEach((slot, i) => {
+      const slotIdx = typeof slot.slot_index === "number" ? slot.slot_index : i;
+      if (!isTerminalRunStatus(slot.run_status)) return;
+      const key = `${m.id}-${slotIdx}`;
+      if (next[key]) {
+        delete next[key];
+        changed = true;
+      }
+    });
+  }
+  return changed ? next : overlay;
+}
+
 /** Single pending tool_call uses logical slot index 0 for SSE `[TOOL_BATCH_SLOT_PROGRESS]`. */
 function singleToolSlotFromMessage(m: AgentChatMessage): AgentChatBatchSlot {
   const tc = m.tool_call;
@@ -633,6 +692,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       }
       const rows = await listAgentChatMessages(sessionId);
       setMessages(rows);
+      setLiveBatchSlotOverlay((prev) => pruneTerminalOverlays(prev, rows));
       setOptimisticMessages((prev) =>
         prev.filter((opt) => !rows.some((row) => row.role === opt.role && row.content === opt.content)),
       );
@@ -771,6 +831,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     }
     void refreshMessages(selectedSessionId);
   }, [selectedSessionId, refreshMessages]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !shouldPollMessages(messages)) return;
+    const id = window.setInterval(() => {
+      void refreshMessages(selectedSessionId, { silent: true });
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [selectedSessionId, messages, refreshMessages]);
 
   useEffect(() => {
     setLiveBatchSlotOverlay({});

@@ -789,11 +789,32 @@ async def tool_confirm_stream(
 
             exec_task = asyncio.create_task(run_tool())
             idle_rounds = 0
+
+            async def persist_single_progress(partial: dict[str, Any]) -> None:
+                updates = {
+                    "tool_call.run_status": str(partial.get("run_status") or "running"),
+                    "tool_call.stdout_tail": partial.get("stdout_tail"),
+                    "tool_call.stderr_tail": partial.get("stderr_tail"),
+                    "tool_call.stdout_truncated": bool(partial.get("stdout_truncated")),
+                    "tool_call.stderr_truncated": bool(partial.get("stderr_truncated")),
+                    "tool_call.execution_log_tail": partial.get("execution_log_tail"),
+                    "tool_call.execution_log_truncated": bool(partial.get("execution_log_truncated")),
+                    "tool_call.progress_line": partial.get("progress_line"),
+                    "tool_call.exit_code": partial.get("exit_code"),
+                    "tool_call.http_status": partial.get("http_status"),
+                }
+                if isinstance(partial.get("run_started_at"), str):
+                    updates["tool_call.run_started_at"] = partial["run_started_at"]
+                if isinstance(partial.get("run_finished_at"), str):
+                    updates["tool_call.run_finished_at"] = partial["run_finished_at"]
+                await db[AGENT_CHAT_MESSAGES_COLLECTION].update_one({"_id": aid}, {"$set": updates})
+
             try:
                 while True:
                     try:
                         partial = await asyncio.wait_for(prog_q.get(), timeout=0.08)
                         idle_rounds = 0
+                        await persist_single_progress(partial)
                         yield _sse_tool_batch_slot_progress(aid, partial)
                         await _sse_flush_tick()
                     except asyncio.TimeoutError:
@@ -803,6 +824,7 @@ async def tool_confirm_stream(
                 while True:
                     try:
                         partial = await asyncio.wait_for(prog_q.get(), timeout=0.02)
+                        await persist_single_progress(partial)
                         yield _sse_tool_batch_slot_progress(aid, partial)
                         await _sse_flush_tick()
                     except asyncio.TimeoutError:
