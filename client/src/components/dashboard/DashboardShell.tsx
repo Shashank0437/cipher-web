@@ -20,6 +20,7 @@ type NavMain = {
 
 const MAIN_NAV: NavMain[] = [
   { href: "/dashboard", label: "Sessions", icon: "history", match: "exact" },
+  { href: "/dashboard/usage", label: "Usage", icon: "analytics", match: "prefix" },
   {
     href: "/dashboard/tools",
     label: "Tools",

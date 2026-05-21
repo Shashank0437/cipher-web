@@ -26,6 +26,9 @@ class AgentChatSessionOut(BaseModel):
     title: str
     created_at: datetime
     updated_at: datetime
+    input_tokens: int = 0
+    output_tokens: int = 0
+    num_calls: int = 0
 
 
 class AgentChatSessionIntelligenceOut(BaseModel):

@@ -145,6 +145,9 @@ def _session_out(doc: dict) -> AgentChatSessionOut:
         title=str(doc.get("title") or "Chat"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
+        input_tokens=int(doc.get("input_tokens") or 0),
+        output_tokens=int(doc.get("output_tokens") or 0),
+        num_calls=int(doc.get("num_calls") or 0),
     )
 
 

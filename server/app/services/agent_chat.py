@@ -1060,6 +1060,8 @@ async def insert_message(
     llm_tool_schemas: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
     tool_name: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> ObjectId:
     doc: dict[str, Any] = {
         "organization_id": organization_id,
@@ -1089,7 +1091,48 @@ async def insert_message(
     if attachments:
         doc["attachments"] = attachments
     res = await db[AGENT_CHAT_MESSAGES_COLLECTION].insert_one(doc)
-    await touch_session(db, session_id)
+    # Estimate and update session token count
+    now_utc = _utc_now()
+    if role == "user":
+        # Bypass metrics updates for user messages to avoid double counting.
+        # Just update the updated_at timestamp.
+        await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+            {"_id": session_id},
+            {"$set": {"updated_at": now_utc}}
+        )
+    elif role == "assistant":
+        if input_tokens is not None and output_tokens is not None:
+            await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+                {"_id": session_id},
+                {
+                    "$inc": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "num_calls": 1,
+                    },
+                    "$set": {"updated_at": now_utc},
+                }
+            )
+        else:
+            in_tok = 1000 + len(content) // 4
+            if llm_tool_schemas:
+                in_tok += len(llm_tool_schemas) * 400
+            out_tok = 10 + len(content) // 4
+            if thinking_content:
+                out_tok += len(thinking_content) // 4
+            await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+                {"_id": session_id},
+                {
+                    "$inc": {
+                        "input_tokens": in_tok,
+                        "output_tokens": out_tok,
+                        "num_calls": 1,
+                    },
+                    "$set": {"updated_at": now_utc},
+                }
+            )
+    else:
+        await touch_session(db, session_id)
     return res.inserted_id
 
 
@@ -2059,6 +2102,8 @@ async def stream_cipherstrike_turn(
     assistant_chunks: list[str] = []
     thinking_chunks: list[str] = []
     seen_done = False
+    actual_input_tokens = None
+    actual_output_tokens = None
 
     path = "api/cipherstrike/llm-stream"
     body: dict[str, Any] = {"messages": llm_messages}
@@ -2155,6 +2200,8 @@ async def stream_cipherstrike_turn(
                             thinking_content="".join(thinking_chunks) or None,
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
+                            input_tokens=actual_input_tokens,
+                            output_tokens=actual_output_tokens,
                         )
                         tool_pending_persisted = True
                         thinking_chunks.clear()
@@ -2235,6 +2282,8 @@ async def stream_cipherstrike_turn(
                             thinking_content="".join(thinking_chunks) or None,
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
+                            input_tokens=actual_input_tokens,
+                            output_tokens=actual_output_tokens,
                         )
                         tool_pending_persisted = True
                         thinking_chunks.clear()
@@ -2245,6 +2294,24 @@ async def stream_cipherstrike_turn(
                             "stream_cipherstrike_turn: persisted SINGLE pending message_id=%s tool=%r state=pending",
                             str(mid), tool_name,
                         )
+
+                elif payload.startswith("[STATS]"):
+                    rest = payload[len("[STATS]") :].strip()
+                    try:
+                        stats_data = json.loads(rest)
+                        if isinstance(stats_data, dict):
+                            usage = stats_data.get("usage")
+                            if isinstance(usage, dict):
+                                actual_input_tokens = int(usage.get("prompt_tokens") or usage.get("prompt_token_count") or 0)
+                                actual_output_tokens = int(usage.get("completion_tokens") or usage.get("completion_token_count") or 0)
+                            else:
+                                p_count = stats_data.get("prompt_eval_count") or stats_data.get("prompt_token_count")
+                                e_count = stats_data.get("eval_count") or stats_data.get("candidates_token_count")
+                                if p_count is not None or e_count is not None:
+                                    actual_input_tokens = int(p_count or 0)
+                                    actual_output_tokens = int(e_count or 0)
+                    except Exception:
+                        logger.exception("stream_cipherstrike_turn: failed to parse STATS payload: %r", rest[:200])
 
                 elif payload == "[DONE]":
                     seen_done = True
@@ -2261,6 +2328,8 @@ async def stream_cipherstrike_turn(
                                 content=full_text,
                                 thinking_content=think_txt,
                                 routing=routing,
+                                input_tokens=actual_input_tokens,
+                                output_tokens=actual_output_tokens,
                             )
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
@@ -2274,6 +2343,8 @@ async def stream_cipherstrike_turn(
                         content=f"[Error] {err_txt}",
                         thinking_content="".join(thinking_chunks) or None,
                         routing=routing,
+                        input_tokens=actual_input_tokens,
+                        output_tokens=actual_output_tokens,
                     )
                 elif payload.startswith("[THINK_TOKEN]"):
                     rest = payload[len("[THINK_TOKEN]") :].strip()
@@ -2309,6 +2380,8 @@ async def stream_cipherstrike_turn(
                     content=full_text,
                     thinking_content=think_txt,
                     routing=routing,
+                    input_tokens=actual_input_tokens,
+                    output_tokens=actual_output_tokens,
                 )
                 yield "data: [DONE]\n\n"
                 await _sse_flush_tick()
@@ -3299,6 +3372,8 @@ async def stream_follow_up_after_tool(
     buffer = ""
     seen_done = False
     tool_pending_persisted = False
+    actual_input_tokens = None
+    actual_output_tokens = None
 
     def _is_duplicate_tool_call(tn: str, args: dict[str, Any]) -> bool:
         key_name = (tn or "").strip().lower()
@@ -3323,6 +3398,8 @@ async def stream_follow_up_after_tool(
             thinking_content=think_txt,
             routing=routing,
             llm_tool_schemas=tool_schemas,
+            input_tokens=actual_input_tokens,
+            output_tokens=actual_output_tokens,
         )
         assistant_chunks.clear()
         thinking_chunks.clear()
@@ -3529,6 +3606,8 @@ async def stream_follow_up_after_tool(
                             thinking_content="".join(thinking_chunks) or None,
                             routing=routing,
                             llm_tool_schemas=tool_schemas,
+                            input_tokens=actual_input_tokens,
+                            output_tokens=actual_output_tokens,
                         )
                         tool_pending_persisted = True
                         thinking_chunks.clear()
@@ -3550,6 +3629,8 @@ async def stream_follow_up_after_tool(
                                 role="assistant",
                                 content=full_text,
                                 thinking_content=think_txt,
+                                input_tokens=actual_input_tokens,
+                                output_tokens=actual_output_tokens,
                             )
                             await recalculate_session_intelligence(
                                 settings,
@@ -3559,6 +3640,23 @@ async def stream_follow_up_after_tool(
                                 session_id=session_id,
                                 use_ai=True,
                             )
+                elif payload.startswith("[STATS]"):
+                    rest = payload[len("[STATS]") :].strip()
+                    try:
+                        stats_data = json.loads(rest)
+                        if isinstance(stats_data, dict):
+                            usage = stats_data.get("usage")
+                            if isinstance(usage, dict):
+                                actual_input_tokens = int(usage.get("prompt_tokens") or usage.get("prompt_token_count") or 0)
+                                actual_output_tokens = int(usage.get("completion_tokens") or usage.get("completion_token_count") or 0)
+                            else:
+                                p_count = stats_data.get("prompt_eval_count") or stats_data.get("prompt_token_count")
+                                e_count = stats_data.get("eval_count") or stats_data.get("candidates_token_count")
+                                if p_count is not None or e_count is not None:
+                                    actual_input_tokens = int(p_count or 0)
+                                    actual_output_tokens = int(e_count or 0)
+                    except Exception:
+                        logger.exception("stream_follow_up_after_tool: failed to parse STATS payload: %r", rest[:200])
                 elif payload.startswith("[ERROR]"):
                     seen_done = True
                     err_txt = payload[7:].lstrip()
@@ -3596,6 +3694,8 @@ async def stream_follow_up_after_tool(
                         role="assistant",
                         content=full_text,
                         thinking_content=think_txt,
+                        input_tokens=actual_input_tokens,
+                        output_tokens=actual_output_tokens,
                     )
                     await recalculate_session_intelligence(
                         settings,

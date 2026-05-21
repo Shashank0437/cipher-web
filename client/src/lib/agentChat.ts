@@ -8,6 +8,9 @@ export type AgentChatSession = {
   title: string;
   created_at: string;
   updated_at: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  num_calls?: number;
 };
 
 export type AgentChatSessionStatus = "IN_PROGRESS" | "COMPLETED" | "FAILED";
