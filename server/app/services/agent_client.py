@@ -14,7 +14,7 @@ from app.config import Settings
 # Raw read size for SSE relay. httpx's ``aiter_text()`` wraps ``aiter_bytes()`` which calls
 # ``aiter_raw()`` with no chunk_size, so each iteration may match a large TCP/TLS read and
 # defer yielding until that buffer fills — the UI sees one burst. Smaller raw reads stream sooner.
-_AGENT_SSE_RAW_CHUNK_BYTES = 1024
+_AGENT_SSE_RAW_CHUNK_BYTES = 16
 
 # Catalog tools call Flask routes under these prefixes (`tool_registry.py` + plugins).
 _AGENT_TOOL_ROUTE_PREFIXES: tuple[str, ...] = (
