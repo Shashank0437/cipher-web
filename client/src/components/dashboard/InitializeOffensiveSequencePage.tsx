@@ -1486,6 +1486,69 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     if (m.role === "assistant" && isEchoAssistantToolJsonDuplicate(visibleMessages, idx)) {
                       return null;
                     }
+
+                    const isToolCallMessage = /^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(m.content?.trim() ?? "");
+                    if (m.role === "assistant" && isToolCallMessage) {
+                      const hasSubsequent = visibleMessages.slice(idx + 1).some(next => 
+                        next.role === "assistant" && 
+                        !/^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(next.content?.trim() ?? "")
+                      );
+                      const hasThinking = Boolean((m.thinking_content ?? "").trim());
+                      const hasPendingToolCall = m.tool_call && String(m.tool_call.state) === "pending" && !batchPanelOpen(m);
+                      const hasBatchPanel = batchPanelOpen(m);
+                      
+                      if (hasSubsequent && !hasThinking && !hasPendingToolCall && !hasBatchPanel) {
+                        return null;
+                      }
+                    }
+
+
+                    const renderAttachments = (() => {
+                      if (!selectedSessionId) return [];
+                      
+                      const isToolCall = /^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(m.content?.trim() ?? "");
+                      if (isToolCall) {
+                        const hasSubsequent = visibleMessages.slice(idx + 1).some(next => 
+                          next.role === "assistant" && 
+                          !/^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(next.content?.trim() ?? "")
+                        );
+                        if (hasSubsequent) {
+                          return [];
+                        }
+                        return m.attachments || [];
+                      }
+                      
+                      if (m.role !== "assistant") return [];
+                      
+                      let list = m.attachments ? [...m.attachments] : [];
+                      
+                      for (let i = idx - 1; i >= 0; i--) {
+                        const prev = visibleMessages[i];
+                        if (!prev) continue;
+                        if (prev.role === "user") {
+                          break;
+                        }
+                        if (prev.role === "assistant") {
+                          const prevIsToolCall = /^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(prev.content?.trim() ?? "");
+                          if (prevIsToolCall) {
+                            if (prev.attachments && prev.attachments.length > 0) {
+                              list = [...prev.attachments, ...list];
+                            }
+                          } else {
+                            break;
+                          }
+                        }
+                      }
+                      
+                      const seen = new Set();
+                      return list.filter(a => {
+                        if (!a.id) return true;
+                        if (seen.has(a.id)) return false;
+                        seen.add(a.id);
+                        return true;
+                      });
+                    })();
+
                     return (
                     <div
                       key={m.id}
@@ -1551,16 +1614,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           <p className="whitespace-pre-wrap break-words break-all">{m.content}</p>
                         )}
                       </div>
-                      {m.role === "assistant" &&
-                      m.attachments &&
-                      m.attachments.length > 0 &&
-                      selectedSessionId ? (
+                      {selectedSessionId && renderAttachments.length > 0 ? (
                         <div className="flex flex-wrap gap-2">
-                          {m.attachments.map((a) => (
+                          {renderAttachments.map((a) => (
                             <button
                               key={a.id}
                               type="button"
-                              onClick={() => void downloadChatPdf(selectedSessionId, a.id, a.filename)}
+                              onClick={() => selectedSessionId && void downloadChatPdf(selectedSessionId, a.id, a.filename)}
                               className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant bg-surface-container-high px-3 py-1.5 text-[13px] font-semibold text-primary transition hover:border-primary/40 hover:bg-primary/8"
                             >
                               <MaterialSymbol name="picture_as_pdf" className="text-lg" />
