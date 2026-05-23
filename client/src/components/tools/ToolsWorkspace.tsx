@@ -462,7 +462,7 @@ export function ToolsWorkspace({ intro = "full" }: { intro?: ToolsWorkspaceIntro
                   placeholder="Search tools…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="h-10 w-full rounded-xl border border-outline-variant bg-surface-container-lowest py-2.5 pr-10 pl-11 text-[14px] text-on-surface outline-none transition-[border-color,box-shadow] placeholder:text-on-surface-variant focus:border-primary focus:ring-1 focus:ring-primary"
+                  className="h-10 w-full rounded-xl border border-outline-variant bg-surface-container-lowest py-2.5 pr-10 pl-11 text-[14px] text-on-surface outline-none transition-[border-color,box-shadow] placeholder:text-on-surface-variant focus:border-primary focus:ring-1 focus:ring-primary no-search-cancel"
                   aria-label="Search tools"
                 />
                 {search.trim().length > 0 ? (

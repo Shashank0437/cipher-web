@@ -188,3 +188,10 @@ body {
   color: var(--color-on-surface);
   margin-bottom: 2rem;
 }
+
+/* Hide native search input 'x' button in WebKit browsers */
+.no-search-cancel::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  display: none;
+}
+
