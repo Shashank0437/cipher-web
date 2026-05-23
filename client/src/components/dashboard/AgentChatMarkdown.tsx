@@ -1,53 +1,11 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
+import type { AgentChatAttachment } from "../../lib/agentChat";
 
-const components: Components = {
-  p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
-  strong: ({ children }) => <strong className="font-semibold text-inherit">{children}</strong>,
-  em: ({ children }) => <em className="italic">{children}</em>,
-  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
-  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  code: ({ className, children, ...props }) => {
-    const block = Boolean(className);
-    if (block) {
-      return (
-        <code
-          className="block min-w-0 max-h-[min(320px,50vh)] overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words break-all rounded-lg bg-surface-container-high px-3 py-2 font-mono text-[12px] text-on-surface [overflow-wrap:anywhere]"
-          {...props}
-        >
-          {children}
-        </code>
-      );
-    }
-    return (
-      <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.9em]" {...props}>
-        {children}
-      </code>
-    );
-  },
-  pre: ({ children }) => <pre className="my-2">{children}</pre>,
-  h1: ({ children }) => <h3 className="mb-1 mt-3 text-base font-bold text-inherit">{children}</h3>,
-  h2: ({ children }) => <h4 className="mb-1 mt-2 text-[15px] font-bold text-inherit">{children}</h4>,
-  h3: ({ children }) => <h5 className="mb-0 mt-2 text-[14px] font-semibold text-inherit">{children}</h5>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      className="text-primary underline underline-offset-2"
-      target="_blank"
-      rel="noopener noreferrer"
-    >
-      {children}
-    </a>
-  ),
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-outline-variant pl-3 italic text-on-surface-variant">{children}</blockquote>
-  ),
-  hr: () => <hr className="my-3 border-outline-variant/60" />,
-};
+// Components are now built dynamically within AgentChatMarkdown using useMemo to support attachment downloading
 
 /** Matches persisted assistant tool rows; fence is 3+ backticks, same length open/close (CommonMark). */
 const TOOL_EXEC_MARKDOWN_BLOCK_RE =
@@ -120,11 +78,100 @@ type Props = {
   className?: string;
   /** When true (default), each complete `[Tool executed: **…**] … ```json` block is wrapped in collapsed `<details>`. */
   collapseToolExecutions?: boolean;
+  attachments?: AgentChatAttachment[] | null;
+  onDownloadAttachment?: (attachmentId: string, filename: string) => void;
 };
 
 /** Renders model text as Markdown (bold, lists, code, links). Safe: no raw HTML execution. */
-export function AgentChatMarkdown({ text, className, collapseToolExecutions = true }: Props) {
+export function AgentChatMarkdown({
+  text,
+  className,
+  collapseToolExecutions = true,
+  attachments,
+  onDownloadAttachment,
+}: Props) {
   const trimmed = text.trim();
+
+  const components = useMemo<Components>(() => ({
+    p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+    strong: ({ children }) => <strong className="font-semibold text-inherit">{children}</strong>,
+    em: ({ children }) => <em className="italic">{children}</em>,
+    ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
+    ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5">{children}</ol>,
+    li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+    code: ({ className, children, ...props }) => {
+      const block = Boolean(className);
+      if (block) {
+        return (
+          <code
+            className="block min-w-0 max-h-[min(320px,50vh)] overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words break-all rounded-lg bg-surface-container-high px-3 py-2 font-mono text-[12px] text-on-surface [overflow-wrap:anywhere]"
+            {...props}
+          >
+            {children}
+          </code>
+        );
+      }
+      return (
+        <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.9em]" {...props}>
+          {children}
+        </code>
+      );
+    },
+    pre: ({ children }) => <pre className="my-2">{children}</pre>,
+    h1: ({ children }) => <h3 className="mb-1 mt-3 text-base font-bold text-inherit">{children}</h3>,
+    h2: ({ children }) => <h4 className="mb-1 mt-2 text-[15px] font-bold text-inherit">{children}</h4>,
+    h3: ({ children }) => <h5 className="mb-0 mt-2 text-[14px] font-semibold text-inherit">{children}</h5>,
+    a: ({ href, children }) => {
+      const decodedHref = href ? decodeURIComponent(href).trim() : "";
+      const isHttp = decodedHref.toLowerCase().startsWith("http://") || decodedHref.toLowerCase().startsWith("https://");
+
+      const matchingAttachment =
+        !isHttp &&
+        attachments &&
+        attachments.find((a) => {
+          const fname = a.filename ? a.filename.trim().toLowerCase() : "";
+          const decodedLower = decodedHref.toLowerCase();
+          return (
+            fname &&
+            (decodedLower === fname ||
+              decodedLower.endsWith("/" + fname) ||
+              fname.endsWith("/" + decodedLower))
+          );
+        });
+
+      if (matchingAttachment && onDownloadAttachment) {
+        return (
+          <a
+            href="#"
+            className="text-primary underline underline-offset-2 cursor-pointer font-semibold"
+            onClick={(e) => {
+              e.preventDefault();
+              onDownloadAttachment(matchingAttachment.id, matchingAttachment.filename);
+            }}
+          >
+            {children}
+          </a>
+        );
+      }
+
+      return (
+        <a
+          href={href}
+          className="text-primary underline underline-offset-2"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {children}
+        </a>
+      );
+    },
+    blockquote: ({ children }) => (
+      <blockquote className="border-l-2 border-outline-variant pl-3 italic text-on-surface-variant">
+        {children}
+      </blockquote>
+    ),
+    hr: () => <hr className="my-3 border-outline-variant/60" />,
+  }), [attachments, onDownloadAttachment]);
   if (!trimmed) return null;
 
   if (!collapseToolExecutions) {

@@ -1608,7 +1608,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                         {m.role === "assistant" ? (
                           // Hide the internal pending-marker content; the tool_call card below renders the request.
                           /^_tool_call_(?:pending|completed|rejected):[^_]+_$/.test(m.content?.trim() ?? "") ? null : (
-                            <AgentChatMarkdown text={m.content} />
+                            <AgentChatMarkdown
+                              text={m.content}
+                              attachments={renderAttachments}
+                              onDownloadAttachment={(id, filename) =>
+                                selectedSessionId && void downloadChatPdf(selectedSessionId, id, filename)
+                              }
+                            />
                           )
                         ) : (
                           <p className="whitespace-pre-wrap break-words break-all">{m.content}</p>
