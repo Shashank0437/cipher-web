@@ -18,6 +18,7 @@ export type AuthUser = {
   username: string;
   tenant_id: string;
   roles: string[];
+  organization_name?: string;
 };
 
 type RegisterRequestPayload = {

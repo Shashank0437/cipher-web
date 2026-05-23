@@ -469,7 +469,7 @@ async def generate_agent_chat_session_report(
         "regenerable": True,
     }
     await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
-        {"_id": sid, "organization_id": user["organization_id"], "user_id": user["_id"]},
+        {"_id": sid, "organization_id": user["organization_id"]},
         {"$set": {"session_intelligence.report_metadata": report_metadata, "updated_at": _utc_now_iso()}},
     )
     return {

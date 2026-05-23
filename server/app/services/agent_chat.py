@@ -810,7 +810,7 @@ async def list_sessions(
 ) -> list[dict[str, Any]]:
     cur = (
         db[AGENT_CHAT_SESSIONS_COLLECTION]
-        .find({"organization_id": organization_id, "user_id": user_id})
+        .find({"organization_id": organization_id})
         .sort("updated_at", -1)
         .limit(limit)
     )
@@ -825,7 +825,7 @@ async def get_session_owned(
     session_id: ObjectId,
 ) -> dict[str, Any] | None:
     return await db[AGENT_CHAT_SESSIONS_COLLECTION].find_one(
-        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"_id": session_id, "organization_id": organization_id},
     )
 
 
@@ -838,7 +838,7 @@ async def rename_session(
     title: str,
 ) -> bool:
     result = await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
-        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"_id": session_id, "organization_id": organization_id},
         {"$set": {"title": title.strip(), "updated_at": _utc_now()}},
     )
     return result.modified_count > 0
@@ -852,13 +852,13 @@ async def delete_session(
     session_id: ObjectId,
 ) -> bool:
     await db[AGENT_CHAT_ATTACHMENTS_COLLECTION].delete_many(
-        {"session_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"session_id": session_id, "organization_id": organization_id},
     )
     await db[AGENT_CHAT_MESSAGES_COLLECTION].delete_many(
-        {"session_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"session_id": session_id, "organization_id": organization_id},
     )
     res = await db[AGENT_CHAT_SESSIONS_COLLECTION].delete_one(
-        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"_id": session_id, "organization_id": organization_id},
     )
     return res.deleted_count > 0
 
@@ -977,7 +977,6 @@ async def get_agent_chat_attachment_owned(
             "_id": attachment_id,
             "session_id": session_id,
             "organization_id": organization_id,
-            "user_id": user_id,
         }
     )
 
@@ -1146,7 +1145,7 @@ async def list_messages(
 ) -> list[dict[str, Any]]:
     cur = (
         db[AGENT_CHAT_MESSAGES_COLLECTION]
-        .find({"session_id": session_id, "organization_id": organization_id, "user_id": user_id})
+        .find({"session_id": session_id, "organization_id": organization_id})
         .sort("created_at", 1)
         .limit(limit)
     )
@@ -1166,7 +1165,6 @@ async def get_message_owned(
             "_id": message_id,
             "session_id": session_id,
             "organization_id": organization_id,
-            "user_id": user_id,
         },
     )
 

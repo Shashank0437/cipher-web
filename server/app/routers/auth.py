@@ -238,13 +238,19 @@ async def login(body: LoginIn, db: AsyncIOMotorDatabase = Depends(get_database))
 
 
 @router.get("/me", response_model=MeOut)
-async def me(user: dict = Depends(require_auth_user)) -> MeOut:
+async def me(
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> MeOut:
+    org = await db.organizations.find_one({"_id": user["organization_id"]})
+    org_name = org.get("name") if org else ""
     return MeOut(
         id=str(user["_id"]),
         email=user["email"],
         username=user.get("username") or "",
         tenant_id=str(user["organization_id"]),
         roles=list(user.get("roles") or []),
+        organization_name=org_name,
     )
 
 
@@ -259,12 +265,15 @@ async def patch_me(
         {"_id": user["_id"]},
         {"$set": {"username": body.username, "updated_at": now}},
     )
+    org = await db.organizations.find_one({"_id": user["organization_id"]})
+    org_name = org.get("name") if org else ""
     return MeOut(
         id=str(user["_id"]),
         email=user["email"],
         username=body.username,
         tenant_id=str(user["organization_id"]),
         roles=list(user.get("roles") or []),
+        organization_name=org_name,
     )
 
 

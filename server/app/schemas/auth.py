@@ -39,6 +39,7 @@ class MeOut(BaseModel):
     username: str
     tenant_id: str
     roles: list[str]
+    organization_name: str = ""
 
 
 class UpdateProfileIn(BaseModel):

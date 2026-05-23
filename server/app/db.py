@@ -49,6 +49,9 @@ async def init_db() -> None:
     await db[AGENT_CHAT_SESSIONS_COLLECTION].create_index(
         [("organization_id", 1), ("user_id", 1), ("updated_at", -1)],
     )
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].create_index(
+        [("organization_id", 1), ("updated_at", -1)],
+    )
     await db[AGENT_CHAT_MESSAGES_COLLECTION].create_index([("session_id", 1), ("created_at", 1)])
     await db[AGENT_CHAT_MESSAGES_COLLECTION].create_index([("organization_id", 1), ("user_id", 1)])
 

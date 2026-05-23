@@ -468,13 +468,13 @@ async def recalculate_session_intelligence(
     use_ai: bool = True,
 ) -> dict[str, Any] | None:
     session_doc = await db[AGENT_CHAT_SESSIONS_COLLECTION].find_one(
-        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"_id": session_id, "organization_id": organization_id},
     )
     if not session_doc:
         return None
     rows = await (
         db[AGENT_CHAT_MESSAGES_COLLECTION]
-        .find({"session_id": session_id, "organization_id": organization_id, "user_id": user_id})
+        .find({"session_id": session_id, "organization_id": organization_id})
         .sort("created_at", 1)
         .to_list(length=200)
     )
@@ -483,7 +483,7 @@ async def recalculate_session_intelligence(
     if intel is None:
         return None
     await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
-        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {"_id": session_id, "organization_id": organization_id},
         {"$set": {"session_intelligence": intel, "updated_at": utc_now()}},
     )
     return intel
@@ -501,7 +501,6 @@ async def list_session_intelligence(
         .find(
             {
                 "organization_id": organization_id,
-                "user_id": user_id,
                 "session_intelligence": {"$exists": True},
             },
         )

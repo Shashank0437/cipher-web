@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 const ADMIN_ONLY_PATH_PREFIXES = [
   "/dashboard/analytics",
   "/dashboard/tools",
+  "/dashboard/usage",
   "/dashboard/users",
 ] as const;
 
