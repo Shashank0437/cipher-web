@@ -412,11 +412,9 @@ const PROMPT_INPUT_PLACEHOLDER =
   "Objective, targets, constraints — agents & tools from the bar below";
 
 const ROTATING_PROMPTS = [
-  "I am an authorized security researcher. My company owns example.com and all its subdomains. I want a full authorized penetration test: start with passive recon, then active scanning, web vulnerability discovery, and summarize findings with recommended next steps.",
-  "I am participating in the HackerOne bug bounty program for example.com. The scope covers *.example.com. Please start with subdomain enumeration, httpx probing, then run nuclei and dalfox against live targets. Flag anything that looks like a valid finding within scope.",
-  "I am solving a CTF challenge. The target binary is at /tmp/challenge. Please run checksec, then strings, then analyze with radare2 and suggest an exploitation approach.",
-  "I am testing my own home WiFi lab. The interface is wlan0. Please put it into monitor mode, capture a WPA2 handshake from BSSID AA:BB:CC:DD:EE:FF, and attempt to crack it using rockyou.txt.",
-  "I have AWS credentials configured for my company's test account. Please run prowler against the account to check for misconfigurations and compliance issues, then summarize critical and high findings.",
+  "Run an automated security scan on https://example.com to discover web vulnerabilities and list open ports.",
+  "Perform subdomain enumeration and live HTTP server discovery on example.com using subfinder and httpx.",
+  "Conduct a standard web penetration test against https://example.com and summarize findings with next steps.",
 ];
 
 type ClaudePromptBoxProps = {
@@ -1318,9 +1316,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           </Link>
         </div>
 
-        <div className="min-h-0 flex-1 px-5 pt-4">
+        <div className="min-h-0 flex-1 px-5 pt-4 flex flex-col">
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">Recent chats</p>
-          <div className="mt-4 flex max-h-[min(420px,50vh)] flex-col gap-1 overflow-y-auto pr-1">
+          <div className="mt-4 flex flex-1 flex-col gap-1 overflow-y-auto pr-1 min-h-0">
             {sessionsLoading ? (
               <p className="text-[13px] text-on-surface-variant">Loading…</p>
             ) : listErr ? (
