@@ -428,45 +428,87 @@ async function consumeSse(
   let buffer = "";
   let sawDone = false;
 
-  while (!signal?.aborted) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // SSE frames end with blank line; normalize CRLF so ``\r\n\r\n`` splits like ``\n\n``.
-    buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  let currentDataLines: string[] = [];
 
-    let sep = buffer.indexOf("\n\n");
-    while (sep !== -1) {
-      const rawBlock = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const data = sseBlockToData(rawBlock);
-      if (data) {
+  const handleLine = async (line: string) => {
+    if (line === "") {
+      if (currentDataLines.length > 0) {
+        const data = currentDataLines.join("\n");
+        currentDataLines = [];
         const ev = parseAgentChatSsePayload(data);
         if (ev) {
           await dispatchSseEvent(ev, onEvent);
           if (ev.type === "done") {
             sawDone = true;
-            await reader.cancel().catch(() => {});
-            return;
           }
         }
       }
-      sep = buffer.indexOf("\n\n");
+    } else if (line.startsWith("data:")) {
+      currentDataLines.push(line.slice(5).trimStart());
     }
-  }
+  };
 
-  if (buffer.trim()) {
-    const data = sseBlockToData(buffer);
-    if (data) {
-      const ev = parseAgentChatSsePayload(data);
-      if (ev) {
-        await dispatchSseEvent(ev, onEvent);
-        if (ev.type === "done") sawDone = true;
+  while (!signal?.aborted) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let pos = 0;
+    while (pos < buffer.length) {
+      const nextN = buffer.indexOf("\n", pos);
+      const nextR = buffer.indexOf("\r", pos);
+
+      let sep = -1;
+      let len = 0;
+
+      if (nextN !== -1 && nextR !== -1) {
+        if (nextN < nextR) {
+          sep = nextN;
+          len = 1;
+        } else {
+          sep = nextR;
+          len = (nextR + 1 < buffer.length && buffer[nextR + 1] === "\n") ? 2 : 1;
+        }
+      } else if (nextN !== -1) {
+        sep = nextN;
+        len = 1;
+      } else if (nextR !== -1) {
+        if (nextR === buffer.length - 1) {
+          break;
+        }
+        sep = nextR;
+        len = (buffer[nextR + 1] === "\n") ? 2 : 1;
       }
+
+      if (sep === -1) {
+        break;
+      }
+
+      const line = buffer.slice(pos, sep);
+      pos = sep + len;
+      await handleLine(line);
+    }
+
+    if (pos > 0) {
+      buffer = buffer.slice(pos);
+    }
+
+    if (sawDone) {
+      await reader.cancel().catch(() => {});
+      return;
     }
   }
 
-  // Server/proxy closed the body without ``[DONE]`` (e.g. legacy agent error path). Unstick the UI.
+  const rest = buffer + decoder.decode(new Uint8Array(), { stream: false });
+  if (rest) {
+    const lines = rest.split(/\r\n|\n|\r/);
+    for (const line of lines) {
+      await handleLine(line);
+    }
+  }
+  await handleLine("");
+
   if (!sawDone) {
     await dispatchSseEvent({ type: "done" }, onEvent);
   }

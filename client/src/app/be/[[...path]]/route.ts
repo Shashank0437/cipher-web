@@ -70,7 +70,17 @@ function streamingResponse(upstream: Response): NextResponse {
     out.set("Cache-Control", "no-cache");
   }
   out.set("X-Accel-Buffering", "no");
-  return new NextResponse(upstream.body, {
+
+  let body: BodyInit | null = upstream.body;
+  if (ctype.includes("text/event-stream") && upstream.body) {
+    const { readable, writable } = new TransformStream();
+    upstream.body.pipeTo(writable).catch((err) => {
+      console.error("Upstream stream pipe error:", err);
+    });
+    body = readable;
+  }
+
+  return new NextResponse(body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: out,

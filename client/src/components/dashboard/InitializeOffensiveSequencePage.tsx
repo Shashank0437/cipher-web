@@ -565,6 +565,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [streamReasoning, setStreamReasoning] = useState("");
   const [reasoningStreaming, setReasoningStreaming] = useState(false);
   const [streamThoughtSeconds, setStreamThoughtSeconds] = useState<number | null>(null);
+  const [waitingForFirstToken, setWaitingForFirstToken] = useState(false);
   const [toolExecutionMode, setToolExecutionMode] = useState<AgentChatToolExecutionMode>("ask_permission");
   const [explicitToolNames, setExplicitToolNames] = useState<string[] | null>(null);
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
@@ -703,7 +704,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     setStreamReasoning("");
     setStreamPreview("");
     resetThoughtClock();
-  }, [resetThoughtClock, stopStreamPreviewFlush]);
+    setWaitingForFirstToken(false);
+  }, [resetThoughtClock, stopStreamPreviewFlush, setWaitingForFirstToken]);
 
   const enqueueStreamPreview = useCallback(() => {
     const pending = streamPreviewQueueRef.current;
@@ -940,6 +942,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
   const attachStreamHandlers = useCallback(
     (sessionId: string) => (ev: AgentChatSseEvent) => {
+      setWaitingForFirstToken(false);
       if (ev.type === "thinking") {
         if (reasoningStartedAtRef.current === null) reasoningStartedAtRef.current = performance.now();
         return;
@@ -1075,6 +1078,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       refreshSessions,
       resetThoughtClock,
       stopStreamPreviewFlush,
+      setWaitingForFirstToken,
     ],
   );
 
@@ -1100,6 +1104,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       setIsSending(true);
       setPinnedToBottom(true);
       clearLiveStreamState();
+      setWaitingForFirstToken(true);
       reasoningStartedAtRef.current = performance.now();
       setOptimisticMessages([
         {
@@ -1140,6 +1145,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     refreshMessages,
     toolExecutionMode,
     explicitToolNames,
+    setWaitingForFirstToken,
   ]);
 
   const handleToolConfirm = useCallback(
@@ -1156,6 +1162,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setStreamReasoning("");
         setReasoningStreaming(false);
         resetThoughtClock();
+        setWaitingForFirstToken(true);
 
         await streamAgentChatToolConfirm(selectedSessionId, assistantMessageId, approved, {
           signal: ac.signal,
@@ -1174,7 +1181,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setConfirmingId(null);
       }
     },
-    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock],
+    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, setWaitingForFirstToken],
   );
 
   const patchBatchDecisions = useCallback(
@@ -1208,6 +1215,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setStreamReasoning("");
         setReasoningStreaming(false);
         resetThoughtClock();
+        setWaitingForFirstToken(true);
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantMessageId && m.batch_execution_state === "awaiting_quorum"
@@ -1233,7 +1241,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setConfirmingId(null);
       }
     },
-    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock],
+    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, setWaitingForFirstToken],
   );
 
   const visibleMessages = optimisticMessages.length > 0 ? [...messages, ...optimisticMessages] : messages;
@@ -1864,6 +1872,20 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       <span className="mt-0.5 inline-block h-3 w-1 animate-pulse rounded-full bg-primary align-middle" />
                     </div>
                   ) : null}
+                  {waitingForFirstToken && (
+                    <div className="mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)] py-2 text-left">
+                      <div className="max-w-[140px] opacity-90">
+                        <svg width="100%" viewBox="0 0 680 200" role="img" xmlns="http://www.w3.org/2000/svg">
+                          <title>AI agent working indicator</title>
+                          <desc>A large purple dot that slowly blinks to indicate an AI agent is working</desc>
+                          <circle cx="340" cy="100" r="48" fill="#7B5EA7">
+                            <animate attributeName="opacity" values="1;0.08;1" dur="2.4s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1" keyTimes="0;0.5;1"/>
+                            <animate attributeName="r" values="48;42;48" dur="2.4s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1" keyTimes="0;0.5;1"/>
+                          </circle>
+                        </svg>
+                      </div>
+                    </div>
+                  )}
                   <div ref={bottomRef} />
                 </div>
               )}
