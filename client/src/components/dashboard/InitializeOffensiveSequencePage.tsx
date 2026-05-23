@@ -411,6 +411,14 @@ function ThoughtDropdownChevron({ className }: { className?: string }) {
 const PROMPT_INPUT_PLACEHOLDER =
   "Objective, targets, constraints — agents & tools from the bar below";
 
+const ROTATING_PROMPTS = [
+  "I am an authorized security researcher. My company owns example.com and all its subdomains. I want a full authorized penetration test: start with passive recon, then active scanning, web vulnerability discovery, and summarize findings with recommended next steps.",
+  "I am participating in the HackerOne bug bounty program for example.com. The scope covers *.example.com. Please start with subdomain enumeration, httpx probing, then run nuclei and dalfox against live targets. Flag anything that looks like a valid finding within scope.",
+  "I am solving a CTF challenge. The target binary is at /tmp/challenge. Please run checksec, then strings, then analyze with radare2 and suggest an exploitation approach.",
+  "I am testing my own home WiFi lab. The interface is wlan0. Please put it into monitor mode, capture a WPA2 handshake from BSSID AA:BB:CC:DD:EE:FF, and attempt to crack it using rockyou.txt.",
+  "I have AWS credentials configured for my company's test account. Please run prowler against the account to check for misconfigurations and compliance issues, then summarize critical and high findings.",
+];
+
 type ClaudePromptBoxProps = {
   textareaId: string;
   prompt: string;
@@ -423,6 +431,7 @@ type ClaudePromptBoxProps = {
   onToolExecutionModeChange: (v: AgentChatToolExecutionMode) => void;
   /** When false, “Auto accept” is disabled (must match tenant admin on the server). */
   allowAutoAcceptTools?: boolean;
+  placeholder?: string;
 };
 
 function CipherStrikeClaudePromptBox({
@@ -436,6 +445,7 @@ function CipherStrikeClaudePromptBox({
   toolExecutionMode,
   onToolExecutionModeChange,
   allowAutoAcceptTools = true,
+  placeholder,
 }: ClaudePromptBoxProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cannotSubmit = !prompt.trim() || isSending;
@@ -468,7 +478,7 @@ function CipherStrikeClaudePromptBox({
           value={prompt}
           onChange={(e) => onPromptChange(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={PROMPT_INPUT_PLACEHOLDER}
+          placeholder={placeholder ?? PROMPT_INPUT_PLACEHOLDER}
           className="relative z-[1] min-h-[4.5rem] w-full resize-none bg-transparent px-3.5 pb-1.5 pt-3.5 text-[14px] leading-snug text-on-surface placeholder:font-medium placeholder:text-on-surface-variant/48 focus:outline-none focus:ring-0 sm:min-h-[5rem] sm:px-4 sm:pt-4"
         />
       </div>
@@ -547,6 +557,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const chatIdParam = searchParams.get("chat_id");
 
   const [prompt, setPrompt] = useState("");
+  const [rotatingPromptIndex, setRotatingPromptIndex] = useState(0);
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
@@ -1272,6 +1283,15 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     isSending ||
     confirmingId;
 
+  useEffect(() => {
+    if (hasThread) return;
+    setRotatingPromptIndex(0);
+    const interval = setInterval(() => {
+      setRotatingPromptIndex((prev) => (prev + 1) % ROTATING_PROMPTS.length);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [hasThread]);
+
   return (
     <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-background font-sans text-on-surface md:flex-row">
       {/* Mobile top bar */}
@@ -1947,6 +1967,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               toolExecutionMode={toolExecutionMode}
               onToolExecutionModeChange={setToolExecutionMode}
               allowAutoAcceptTools={isTenantAdmin}
+              placeholder={ROTATING_PROMPTS[rotatingPromptIndex]}
             />
           </div>
           ) : null}
