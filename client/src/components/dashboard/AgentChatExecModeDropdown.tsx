@@ -203,10 +203,8 @@ export function AgentChatExecModeDropdown({
           onKeyDown={onListKeyDown}
           className={`absolute bottom-[calc(100%+8px)] z-[60] max-h-[min(280px,40vh)] overflow-auto rounded-xl border border-outline-variant bg-surface-container-lowest py-1.5 shadow-lg outline-none ring-1 ring-black/[0.04] ${
             align === "end"
-              ? compact
-                ? "right-0 left-auto min-w-full max-w-[min(calc(100vw-2rem),320px)]"
-                : "right-0 left-auto w-max min-w-[280px] max-w-[min(calc(100vw-2rem),320px)]"
-              : "left-0 w-[min(calc(100vw-2rem),280px)] max-w-[min(calc(100vw-2rem),280px)]"
+              ? "right-0 left-auto w-max min-w-[300px] max-w-[min(calc(100vw-2rem),340px)]"
+              : "left-0 w-max min-w-[300px] max-w-[min(calc(100vw-2rem),340px)]"
           }`}
         >
           {OPTIONS.map((opt, i) => {
