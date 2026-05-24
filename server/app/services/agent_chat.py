@@ -3064,6 +3064,21 @@ async def execute_tool_slots_follow_up(
         for s in updated_slots
         if str(s.get("execution_outcome") or "").lower() in ("completed", "done", "success")
     )
+    batch_remaining_names: list[str] = []
+    if isinstance(pruned_batch_follow_schemas, list):
+        batch_remaining_names = [
+            str((s.get("function") or {}).get("name") or s.get("name") or "").strip()
+            for s in pruned_batch_follow_schemas
+            if isinstance(s, dict)
+        ]
+    batch_remaining_nudge = ""
+    if batch_remaining_names:
+        batch_remaining_nudge = (
+            f" You still have these tools available: {', '.join(batch_remaining_names)}. "
+            "If the user's ORIGINAL message requested actions that match any of these remaining tools "
+            "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
+            "in this turn — do NOT ask the user for confirmation. The user already requested it."
+        )
     batch_summarize_system = {
         "role": "system",
         "content": (
@@ -3071,6 +3086,7 @@ async def execute_tool_slots_follow_up(
             "Their results are in the tool messages that follow. Summarize ALL findings in a single concise "
             "prose response for the operator (group by tool, highlight notable findings, suggest next steps). "
             "Do NOT re-call any of the tools that already ran in this batch."
+            + batch_remaining_nudge
         ),
     }
     # Build a single assistant turn with all the batch tool_calls, then one tool-role message
@@ -3237,12 +3253,28 @@ async def _auto_execute_single_tool_sse(
             if isinstance(s, dict)
             and str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower() != ran_tool_lower
         ] or None
+    remaining_tool_names: list[str] = []
+    if isinstance(pruned_follow_schemas, list):
+        remaining_tool_names = [
+            str((s.get("function") or {}).get("name") or s.get("name") or "").strip()
+            for s in pruned_follow_schemas
+            if isinstance(s, dict)
+        ]
+    remaining_tool_nudge = ""
+    if remaining_tool_names:
+        remaining_tool_nudge = (
+            f" You still have these tools available: {', '.join(remaining_tool_names)}. "
+            "If the user's ORIGINAL message requested actions that match any of these remaining tools "
+            "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
+            "in this turn — do NOT ask the user for confirmation. The user already requested it."
+        )
     summarize_system = {
         "role": "system",
         "content": (
             f"The {tool_name} tool just ran and its result is in the previous tool message. "
             "Summarize the findings in plain prose for the operator: what was discovered, what stands out, "
             "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments."
+            + remaining_tool_nudge
         ),
     }
     follow_msgs = (
