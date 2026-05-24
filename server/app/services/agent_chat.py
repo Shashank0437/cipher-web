@@ -3545,6 +3545,36 @@ async def stream_follow_up_after_tool(
                             yield line
                         skip_outer_yield = True
                     else:
+                        lines: list[str] = []
+                        for slot in slots:
+                            tn = slot["tool_name"]
+                            args = slot["arguments"]
+                            lines.append(f"- **{tn}** — `{json.dumps(args)}`")
+                        content = (
+                            "Tool batch pending human approval (all slots must be approve/reject before execution):\n"
+                            + "\n".join(lines)
+                        )
+                        mid = await insert_message(
+                            db,
+                            organization_id=organization_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role="assistant",
+                            content=content,
+                            tool_calls=slots,
+                            batch_execution_state="awaiting_quorum",
+                            llm_messages_snapshot=list(llm_messages),
+                            thinking_content="".join(thinking_chunks) or None,
+                            routing=routing,
+                            llm_tool_schemas=tool_schemas,
+                            input_tokens=actual_input_tokens,
+                            output_tokens=actual_output_tokens,
+                        )
+                        tool_pending_persisted = True
+                        thinking_chunks.clear()
+                        assistant_chunks.clear()
+                        out_payload = {"assistant_message_id": str(mid), "calls": calls}
+                        raw_event = f"data: [TOOL_CALL_BATCH_PENDING] {json.dumps(out_payload)}"
                         skip_outer_yield = False
 
                 elif payload.startswith("[TOOL_CALL_PENDING]"):
