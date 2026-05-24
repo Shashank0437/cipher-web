@@ -174,20 +174,23 @@ export function DashboardShell({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="flex min-h-screen min-w-0 flex-1 flex-col bg-background">
-        <header className="sticky top-0 z-40 flex items-center justify-between border-b border-outline-variant bg-background/90 px-6 py-3 backdrop-blur-sm">
+        <header className="sticky top-0 z-40 flex items-center justify-end border-b border-outline-variant bg-background/90 px-6 py-3 backdrop-blur-sm">
           <div className="flex items-center gap-3">
             {user.organization_name && (
-              <div className="flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-container text-[11px] font-black uppercase text-primary">
-                  {user.organization_name.slice(0, 2).toUpperCase()}
-                </span>
-                <span className="text-sm font-semibold text-on-surface">
-                  {user.organization_name}
-                </span>
-              </div>
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="flex h-5 w-5 items-center justify-center rounded bg-primary-container text-[11px] font-black uppercase text-primary">
+                    {user.organization_name.slice(0, 2).toUpperCase()}
+                  </span>
+                  <span className="text-sm font-semibold text-on-surface">
+                    {user.organization_name}
+                  </span>
+                </div>
+                <span className="mx-1 h-5 w-px bg-outline-variant" aria-hidden="true" />
+              </>
             )}
+            <DashboardHeaderProfile user={user} />
           </div>
-          <DashboardHeaderProfile user={user} />
         </header>
         <main className="min-h-full flex-1 p-6">{children}</main>
       </div>
