@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowDown, ArrowUp, Loader2, Terminal } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { AgentChatMarkdown, extractToolResultJsonFromExecContent } from "@/components/dashboard/AgentChatMarkdown";
 import { DashboardHeaderProfile } from "@/components/dashboard/DashboardHeaderProfile";
 import { AgentChatExecModeDropdown } from "@/components/dashboard/AgentChatExecModeDropdown";
@@ -548,6 +548,29 @@ function CipherStrikeClaudePromptBox({
   );
 }
 
+
+interface SessionStreamState {
+  isSending: boolean;
+  confirmingId: string | null;
+  streamPreview: string;
+  streamReasoning: string;
+  reasoningStreaming: boolean;
+  streamThoughtSeconds: number | null;
+  waitingForFirstToken: boolean;
+  liveBatchSlotOverlay: Record<string, Partial<AgentChatBatchSlot>>;
+}
+
+const DEFAULT_SESSION_STREAM_STATE: SessionStreamState = {
+  isSending: false,
+  confirmingId: null,
+  streamPreview: "",
+  streamReasoning: "",
+  reasoningStreaming: false,
+  streamThoughtSeconds: null,
+  waitingForFirstToken: false,
+  liveBatchSlotOverlay: {},
+};
+
 export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -558,23 +581,47 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [rotatingPromptIndex, setRotatingPromptIndex] = useState(0);
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentChatMessage[]>([]);
-  const [optimisticMessages, setOptimisticMessages] = useState<AgentChatMessage[]>([]);
+  const [messages, setMessages] = useState<Record<string, AgentChatMessage[]>>({});
+  const [optimisticMessages, setOptimisticMessages] = useState<Record<string, AgentChatMessage[]>>({});
   const [listErr, setListErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [isSending, setIsSending] = useState(false);
-  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
+  const [streamStates, setStreamStates] = useState<Record<string, SessionStreamState>>({});
+
+  const updateSessionStreamState = useCallback(
+    (sid: string | null, updates: Partial<SessionStreamState> | ((prev: SessionStreamState) => SessionStreamState)) => {
+      if (!sid) return;
+      setStreamStates((prev) => {
+        const current = prev[sid] || DEFAULT_SESSION_STREAM_STATE;
+        const next = typeof updates === "function" ? updates(current) : { ...current, ...updates };
+        return { ...prev, [sid]: next };
+      });
+    },
+    [],
+  );
+
+  const currentStreamState = (selectedSessionId && streamStates[selectedSessionId]) || DEFAULT_SESSION_STREAM_STATE;
+  const isSending = currentStreamState.isSending;
+  const confirmingId = currentStreamState.confirmingId;
+  const streamPreview = currentStreamState.streamPreview;
+  const streamReasoning = currentStreamState.streamReasoning;
+  const reasoningStreaming = currentStreamState.reasoningStreaming;
+  const streamThoughtSeconds = currentStreamState.streamThoughtSeconds;
+  const waitingForFirstToken = currentStreamState.waitingForFirstToken;
+  const liveBatchSlotOverlay = currentStreamState.liveBatchSlotOverlay;
+
+  const currentMessages = useMemo(() => {
+    return (selectedSessionId && messages[selectedSessionId]) || [];
+  }, [selectedSessionId, messages]);
+
+  const currentOptimisticMessages = useMemo(() => {
+    return (selectedSessionId && optimisticMessages[selectedSessionId]) || [];
+  }, [selectedSessionId, optimisticMessages]);
+
   /** PATCH …/tool-decisions in flight for this assistant message id */
   const [batchDecisionsBusyId, setBatchDecisionsBusyId] = useState<string | null>(null);
-  /** Live merges from ``[TOOL_BATCH_SLOT_PROGRESS]`` SSE during batch execute (key: ``messageId-slotIndex``). */
-  const [liveBatchSlotOverlay, setLiveBatchSlotOverlay] = useState<Record<string, Partial<AgentChatBatchSlot>>>({});
-  const [streamPreview, setStreamPreview] = useState("");
-  const [streamReasoning, setStreamReasoning] = useState("");
-  const [reasoningStreaming, setReasoningStreaming] = useState(false);
-  const [streamThoughtSeconds, setStreamThoughtSeconds] = useState<number | null>(null);
-  const [waitingForFirstToken, setWaitingForFirstToken] = useState(false);
   const [toolExecutionMode, setToolExecutionMode] = useState<AgentChatToolExecutionMode>("ask_permission");
   const [explicitToolNames, setExplicitToolNames] = useState<string[] | null>(null);
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
@@ -589,11 +636,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   /** Inner wrapper used with ResizeObserver so layout growth still triggers follow-scroll when pinned */
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
-  const reasoningStartedAtRef = useRef<number | null>(null);
-  const streamPreviewQueueRef = useRef("");
-  const streamPreviewFlushTimerRef = useRef<number | null>(null);
+  const reasoningStartedAtRef = useRef<Record<string, number | null>>({});
+  const streamPreviewQueueRef = useRef<Record<string, string>>({});
+  const streamPreviewFlushTimerRef = useRef<Record<string, number>>({});
   /** Debounce Mongo refresh when tool slots hit terminal status (before overall SSE `[DONE]`). */
-  const toolSlotTerminalRefreshTimerRef = useRef<number | null>(null);
+  const toolSlotTerminalRefreshTimerRef = useRef<Record<string, number>>({});
   /** Skip auto-selecting the newest session once after `?new=1` so Run Scan opens an empty composer. */
   const skipAutosSelectRef = useRef(false);
 
@@ -648,11 +695,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setActionErr(null);
       }
       const rows = await listAgentChatMessages(sessionId);
-      setMessages(rows);
-      setLiveBatchSlotOverlay((prev) => pruneTerminalOverlays(prev, rows));
-      setOptimisticMessages((prev) =>
-        prev.filter((opt) => !rows.some((row) => row.role === opt.role && row.content === opt.content)),
-      );
+      setMessages((prev) => ({ ...prev, [sessionId]: rows }));
+      updateSessionStreamState(sessionId, (prev) => ({
+        ...prev,
+        liveBatchSlotOverlay: pruneTerminalOverlays(prev.liveBatchSlotOverlay, rows),
+      }));
+      setOptimisticMessages((prev) => {
+        const current = prev[sessionId] || [];
+        return {
+          ...prev,
+          [sessionId]: current.filter((opt) => !rows.some((row) => row.role === opt.role && row.content === opt.content)),
+        };
+      });
     } catch (e) {
       setActionErr(formatChatError(e));
     } finally {
@@ -660,7 +714,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setMessagesLoading(false);
       }
     }
-  }, []);
+  }, [updateSessionStreamState]);
 
   const downloadChatPdf = useCallback(async (sessionId: string, attachmentId: string, fallbackName: string) => {
     try {
@@ -679,62 +733,81 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     }
   }, []);
 
-  const captureThoughtDuration = useCallback(() => {
-    const start = reasoningStartedAtRef.current;
-    if (start === null) return;
+  const captureThoughtDuration = useCallback((sessionId: string) => {
+    const start = reasoningStartedAtRef.current[sessionId];
+    if (start === null || start === undefined) return;
     const sec = Math.round(((performance.now() - start) / 1000) * 10) / 10;
-    reasoningStartedAtRef.current = null;
-    setStreamThoughtSeconds(Math.max(0.1, sec));
-  }, []);
+    reasoningStartedAtRef.current[sessionId] = null;
+    updateSessionStreamState(sessionId, {
+      streamThoughtSeconds: Math.max(0.1, sec),
+    });
+  }, [updateSessionStreamState]);
 
-  const resetThoughtClock = useCallback(() => {
-    reasoningStartedAtRef.current = null;
-    setStreamThoughtSeconds(null);
-  }, []);
+  const resetThoughtClock = useCallback((sessionId: string) => {
+    reasoningStartedAtRef.current[sessionId] = null;
+    updateSessionStreamState(sessionId, {
+      streamThoughtSeconds: null,
+    });
+  }, [updateSessionStreamState]);
 
-  const flushAllStreamPreview = useCallback(() => {
-    const pending = streamPreviewQueueRef.current;
+  const flushAllStreamPreview = useCallback((sessionId: string) => {
+    const pending = streamPreviewQueueRef.current[sessionId] || "";
     if (!pending) return;
-    streamPreviewQueueRef.current = "";
-    setStreamPreview((prev) => prev + pending);
-  }, []);
+    delete streamPreviewQueueRef.current[sessionId];
+    updateSessionStreamState(sessionId, (prev) => ({
+      ...prev,
+      streamPreview: prev.streamPreview + pending,
+    }));
+  }, [updateSessionStreamState]);
 
-  const stopStreamPreviewFlush = useCallback(() => {
-    if (streamPreviewFlushTimerRef.current !== null) {
-      window.clearInterval(streamPreviewFlushTimerRef.current);
-      streamPreviewFlushTimerRef.current = null;
+  const stopStreamPreviewFlush = useCallback((sessionId: string) => {
+    const timer = streamPreviewFlushTimerRef.current[sessionId];
+    if (timer != null) {
+      window.clearInterval(timer);
+      delete streamPreviewFlushTimerRef.current[sessionId];
     }
   }, []);
 
-  const clearLiveStreamState = useCallback(() => {
-    stopStreamPreviewFlush();
-    streamPreviewQueueRef.current = "";
-    setReasoningStreaming(false);
-    setStreamReasoning("");
-    setStreamPreview("");
-    resetThoughtClock();
-    setWaitingForFirstToken(false);
-  }, [resetThoughtClock, stopStreamPreviewFlush, setWaitingForFirstToken]);
+  const clearLiveStreamState = useCallback((sessionId?: string | null) => {
+    if (!sessionId) return;
+    stopStreamPreviewFlush(sessionId);
+    if (streamPreviewQueueRef.current) {
+      delete streamPreviewQueueRef.current[sessionId];
+    }
+    updateSessionStreamState(sessionId, {
+      reasoningStreaming: false,
+      streamReasoning: "",
+      streamPreview: "",
+      waitingForFirstToken: false,
+    });
+    resetThoughtClock(sessionId);
+  }, [resetThoughtClock, stopStreamPreviewFlush, updateSessionStreamState]);
 
-  const enqueueStreamPreview = useCallback(() => {
-    const pending = streamPreviewQueueRef.current;
+  const enqueueStreamPreview = useCallback((sessionId: string) => {
+    const pending = streamPreviewQueueRef.current[sessionId] || "";
     if (pending) {
       const takeNow = Math.min(6, pending.length);
-      streamPreviewQueueRef.current = pending.slice(takeNow);
-      setStreamPreview((prev) => prev + pending.slice(0, takeNow));
+      streamPreviewQueueRef.current[sessionId] = pending.slice(takeNow);
+      updateSessionStreamState(sessionId, (prev) => ({
+        ...prev,
+        streamPreview: prev.streamPreview + pending.slice(0, takeNow),
+      }));
     }
-    if (streamPreviewFlushTimerRef.current !== null) return;
-    streamPreviewFlushTimerRef.current = window.setInterval(() => {
-      const pending = streamPreviewQueueRef.current;
-      if (!pending) {
-        stopStreamPreviewFlush();
+    if (streamPreviewFlushTimerRef.current[sessionId] != null) return;
+    streamPreviewFlushTimerRef.current[sessionId] = window.setInterval(() => {
+      const p = streamPreviewQueueRef.current[sessionId] || "";
+      if (!p) {
+        stopStreamPreviewFlush(sessionId);
         return;
       }
-      const take = pending.length > 80 ? 16 : pending.length > 32 ? 10 : 6;
-      streamPreviewQueueRef.current = pending.slice(take);
-      setStreamPreview((prev) => prev + pending.slice(0, take));
+      const take = p.length > 80 ? 16 : p.length > 32 ? 10 : 6;
+      streamPreviewQueueRef.current[sessionId] = p.slice(take);
+      updateSessionStreamState(sessionId, (prev) => ({
+        ...prev,
+        streamPreview: prev.streamPreview + p.slice(0, take),
+      }));
     }, 24);
-  }, [stopStreamPreviewFlush]);
+  }, [stopStreamPreviewFlush, updateSessionStreamState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -751,11 +824,12 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         abortRef.current?.abort();
         skipAutosSelectRef.current = true;
         setSelectedSessionId(null);
-        setMessages([]);
-        setOptimisticMessages([]);
+        setMessages({});
+        setOptimisticMessages({});
         setPrompt("");
-        setLiveBatchSlotOverlay({});
-        clearLiveStreamState();
+        if (selectedSessionId) {
+          clearLiveStreamState(selectedSessionId);
+        }
         setExplicitToolNames(null);
         router.replace("/dashboard/scan", { scroll: false });
         return;
@@ -773,7 +847,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshSessions, openFreshChatFlag, chatIdParam, router, clearLiveStreamState]);
+  }, [refreshSessions, openFreshChatFlag, chatIdParam, router, clearLiveStreamState, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -783,33 +857,31 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
   useEffect(() => {
     if (!selectedSessionId) {
-      setMessages([]);
-      setOptimisticMessages([]);
       return;
     }
     void refreshMessages(selectedSessionId);
   }, [selectedSessionId, refreshMessages]);
 
   useEffect(() => {
-    if (!selectedSessionId || !shouldPollMessages(messages)) return;
+    if (!selectedSessionId || !shouldPollMessages(currentMessages)) return;
     const id = window.setInterval(() => {
       void refreshMessages(selectedSessionId, { silent: true });
     }, 1500);
     return () => window.clearInterval(id);
-  }, [selectedSessionId, messages, refreshMessages]);
+  }, [selectedSessionId, currentMessages, refreshMessages]);
 
   useEffect(() => {
-    setLiveBatchSlotOverlay({});
-  }, [selectedSessionId]);
-
-  useEffect(() => {
+    const flushTimers = streamPreviewFlushTimerRef.current;
+    const terminalTimers = toolSlotTerminalRefreshTimerRef.current;
     return () => {
-      if (toolSlotTerminalRefreshTimerRef.current !== null) {
-        window.clearTimeout(toolSlotTerminalRefreshTimerRef.current);
-        toolSlotTerminalRefreshTimerRef.current = null;
-      }
+      Object.values(flushTimers).forEach((timer) => {
+        if (timer != null) window.clearInterval(timer);
+      });
+      Object.values(terminalTimers).forEach((timer) => {
+        if (timer != null) window.clearTimeout(timer);
+      });
     };
-  }, [selectedSessionId]);
+  }, []);
 
   useEffect(() => {
     setPinnedToBottom(true);
@@ -823,7 +895,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     return () => cancelAnimationFrame(id);
   }, [
     pinnedToBottom,
-    messages,
+    currentMessages,
     streamPreview,
     streamReasoning,
     reasoningStreaming,
@@ -924,11 +996,26 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         }
         await deleteAgentChatSession(sessionId);
         await refreshSessions();
+
+        setMessages((prev) => {
+          const next = { ...prev };
+          delete next[sessionId];
+          return next;
+        });
+        setOptimisticMessages((prev) => {
+          const next = { ...prev };
+          delete next[sessionId];
+          return next;
+        });
+        setStreamStates((prev) => {
+          const next = { ...prev };
+          delete next[sessionId];
+          return next;
+        });
+        clearLiveStreamState(sessionId);
+
         if (selectedSessionId === sessionId) {
           setSelectedSessionId(null);
-          setMessages([]);
-          setOptimisticMessages([]);
-          clearLiveStreamState();
           router.replace("/dashboard/scan?new=1", { scroll: false });
         }
       } catch (err) {
@@ -942,37 +1029,43 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     abortRef.current?.abort();
     setActionErr(null);
     setSelectedSessionId(null);
-    setMessages([]);
-    setOptimisticMessages([]);
-    setLiveBatchSlotOverlay({});
-    clearLiveStreamState();
+    setMessages({});
+    setOptimisticMessages({});
+    clearLiveStreamState(selectedSessionId);
     router.replace("/dashboard/scan?new=1", { scroll: false });
-  }, [clearLiveStreamState, router]);
+  }, [clearLiveStreamState, router, selectedSessionId]);
 
   const attachStreamHandlers = useCallback(
     (sessionId: string) => (ev: AgentChatSseEvent) => {
-      setWaitingForFirstToken(false);
+      updateSessionStreamState(sessionId, { waitingForFirstToken: false });
       if (ev.type === "thinking") {
-        if (reasoningStartedAtRef.current === null) reasoningStartedAtRef.current = performance.now();
+        if (reasoningStartedAtRef.current[sessionId] === null || reasoningStartedAtRef.current[sessionId] === undefined) {
+          reasoningStartedAtRef.current[sessionId] = performance.now();
+        }
         return;
       }
       if (ev.type === "thinking_token") {
-        setReasoningStreaming(true);
-        if (reasoningStartedAtRef.current === null) reasoningStartedAtRef.current = performance.now();
-        setStreamReasoning((prev) => prev + ev.text);
+        updateSessionStreamState(sessionId, (prev) => ({
+          ...prev,
+          reasoningStreaming: true,
+          streamReasoning: prev.streamReasoning + ev.text,
+        }));
+        if (reasoningStartedAtRef.current[sessionId] === null || reasoningStartedAtRef.current[sessionId] === undefined) {
+          reasoningStartedAtRef.current[sessionId] = performance.now();
+        }
         return;
       }
       if (ev.type === "token") {
-        captureThoughtDuration();
-        setReasoningStreaming(false);
-        streamPreviewQueueRef.current += ev.text;
-        enqueueStreamPreview();
+        captureThoughtDuration(sessionId);
+        updateSessionStreamState(sessionId, { reasoningStreaming: false });
+        streamPreviewQueueRef.current[sessionId] = (streamPreviewQueueRef.current[sessionId] || "") + ev.text;
+        enqueueStreamPreview(sessionId);
         return;
       }
       if (ev.type === "tool_pending") {
-        captureThoughtDuration();
-        flushAllStreamPreview();
-        clearLiveStreamState();
+        captureThoughtDuration(sessionId);
+        flushAllStreamPreview(sessionId);
+        clearLiveStreamState(sessionId);
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
@@ -984,14 +1077,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         return;
       }
       if (ev.type === "tool_batch_pending") {
-        captureThoughtDuration();
-        flushAllStreamPreview();
-        clearLiveStreamState();
+        captureThoughtDuration(sessionId);
+        flushAllStreamPreview(sessionId);
+        clearLiveStreamState(sessionId);
         const optimisticBatch = agentChatMessageFromBatchPendingPayload(ev.payload);
         if (optimisticBatch) {
           setMessages((prev) => {
-            const rest = prev.filter((m) => m.id !== optimisticBatch.id);
-            return [...rest, optimisticBatch];
+            const current = prev[sessionId] || [];
+            const rest = current.filter((m) => m.id !== optimisticBatch.id);
+            return {
+              ...prev,
+              [sessionId]: [...rest, optimisticBatch],
+            };
           });
         }
         void (async () => {
@@ -1013,25 +1110,32 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         delete rest.message_id;
         const key = `${mid}-${si}`;
         const rs = String(rest.run_status ?? "").toLowerCase();
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === mid && m.batch_execution_state === "awaiting_quorum"
-              ? { ...m, batch_execution_state: "executing" }
-              : m,
-          ),
-        );
-        setLiveBatchSlotOverlay((prev) => ({
+        setMessages((prev) => {
+          const current = prev[sessionId] || [];
+          return {
+            ...prev,
+            [sessionId]: current.map((m) =>
+              m.id === mid && m.batch_execution_state === "awaiting_quorum"
+                ? { ...m, batch_execution_state: "executing" }
+                : m,
+            ),
+          };
+        });
+        updateSessionStreamState(sessionId, (prev) => ({
           ...prev,
-          [key]: { ...prev[key], ...(rest as Partial<AgentChatBatchSlot>) },
+          liveBatchSlotOverlay: {
+            ...prev.liveBatchSlotOverlay,
+            [key]: { ...prev.liveBatchSlotOverlay[key], ...(rest as Partial<AgentChatBatchSlot>) },
+          },
         }));
-        // Server persists confirmed slots / tool_call before LLM follow-up; refresh now so the approval
-        // card does not stick until the entire follow-up stream finishes or the connection drops.
+        
         if (rs === "done" || rs === "error" || rs === "skipped") {
-          if (toolSlotTerminalRefreshTimerRef.current !== null) {
-            window.clearTimeout(toolSlotTerminalRefreshTimerRef.current);
+          const existingTimer = toolSlotTerminalRefreshTimerRef.current[sessionId];
+          if (existingTimer != null) {
+            window.clearTimeout(existingTimer);
           }
-          toolSlotTerminalRefreshTimerRef.current = window.setTimeout(() => {
-            toolSlotTerminalRefreshTimerRef.current = null;
+          toolSlotTerminalRefreshTimerRef.current[sessionId] = window.setTimeout(() => {
+            delete toolSlotTerminalRefreshTimerRef.current[sessionId];
             void (async () => {
               try {
                 await refreshMessages(sessionId, { silent: true });
@@ -1044,9 +1148,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         return;
       }
       if (ev.type === "error") {
-        captureThoughtDuration();
+        captureThoughtDuration(sessionId);
         setActionErr(ev.message);
-        clearLiveStreamState();
+        clearLiveStreamState(sessionId);
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
@@ -1057,14 +1161,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         return;
       }
       if (ev.type === "done") {
-        captureThoughtDuration();
-        flushAllStreamPreview();
-        stopStreamPreviewFlush();
-        streamPreviewQueueRef.current = "";
-        setReasoningStreaming(false);
-        setStreamReasoning("");
-        resetThoughtClock();
-        setLiveBatchSlotOverlay({});
+        captureThoughtDuration(sessionId);
+        flushAllStreamPreview(sessionId);
+        stopStreamPreviewFlush(sessionId);
+        if (streamPreviewQueueRef.current) {
+          delete streamPreviewQueueRef.current[sessionId];
+        }
+        updateSessionStreamState(sessionId, {
+          reasoningStreaming: false,
+          streamReasoning: "",
+          liveBatchSlotOverlay: {},
+        });
+        resetThoughtClock(sessionId);
         void (async () => {
           try {
             await refreshMessages(sessionId, { silent: true });
@@ -1072,7 +1180,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           } catch (e) {
             setActionErr(formatChatError(e));
           } finally {
-            setStreamPreview("");
+            updateSessionStreamState(sessionId, { streamPreview: "" });
           }
         })();
         return;
@@ -1087,7 +1195,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       refreshSessions,
       resetThoughtClock,
       stopStreamPreviewFlush,
-      setWaitingForFirstToken,
+      updateSessionStreamState,
     ],
   );
 
@@ -1110,19 +1218,24 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       }
 
       setPrompt("");
-      setIsSending(true);
+      updateSessionStreamState(sessionId, {
+        isSending: true,
+        waitingForFirstToken: true,
+      });
       setPinnedToBottom(true);
-      clearLiveStreamState();
-      setWaitingForFirstToken(true);
-      reasoningStartedAtRef.current = performance.now();
-      setOptimisticMessages([
-        {
-          id: `optimistic-user-${Date.now()}`,
-          role: "user",
-          content: text,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      clearLiveStreamState(sessionId);
+      reasoningStartedAtRef.current[sessionId] = performance.now();
+      setOptimisticMessages((prev) => ({
+        ...prev,
+        [sessionId!]: [
+          {
+            id: `optimistic-user-${Date.now()}`,
+            role: "user",
+            content: text,
+            created_at: new Date().toISOString(),
+          },
+        ],
+      }));
 
       await streamAgentChatMessage(sessionId, text, {
         signal: ac.signal,
@@ -1132,18 +1245,26 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       });
     } catch (e) {
       if ((e as Error).name === "AbortError") {
-        setReasoningStreaming(false);
-        setStreamReasoning("");
-        setStreamPreview("");
-        setOptimisticMessages([]);
+        if (sessionId) {
+          updateSessionStreamState(sessionId, {
+            reasoningStreaming: false,
+            streamReasoning: "",
+            streamPreview: "",
+          });
+          setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
+        }
         return;
       }
       setPrompt(text);
-      setOptimisticMessages([]);
-      setActionErr(formatChatError(e));
-      if (sessionId) await refreshMessages(sessionId);
+      if (sessionId) {
+        setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
+        setActionErr(formatChatError(e));
+        await refreshMessages(sessionId);
+      }
     } finally {
-      setIsSending(false);
+      if (sessionId) {
+        updateSessionStreamState(sessionId, { isSending: false });
+      }
     }
   }, [
     prompt,
@@ -1154,7 +1275,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     refreshMessages,
     toolExecutionMode,
     explicitToolNames,
-    setWaitingForFirstToken,
+    updateSessionStreamState,
   ]);
 
   const handleToolConfirm = useCallback(
@@ -1165,13 +1286,15 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       abortRef.current = ac;
 
       try {
-        setConfirmingId(assistantMessageId);
+        updateSessionStreamState(selectedSessionId, {
+          confirmingId: assistantMessageId,
+          streamPreview: "",
+          streamReasoning: "",
+          reasoningStreaming: false,
+          waitingForFirstToken: true,
+        });
         setActionErr(null);
-        setStreamPreview("");
-        setStreamReasoning("");
-        setReasoningStreaming(false);
-        resetThoughtClock();
-        setWaitingForFirstToken(true);
+        resetThoughtClock(selectedSessionId);
 
         await streamAgentChatToolConfirm(selectedSessionId, assistantMessageId, approved, {
           signal: ac.signal,
@@ -1179,18 +1302,20 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         });
       } catch (e) {
         if ((e as Error).name === "AbortError") {
-          setStreamPreview("");
-          setStreamReasoning("");
-          setReasoningStreaming(false);
+          updateSessionStreamState(selectedSessionId, {
+            streamPreview: "",
+            streamReasoning: "",
+            reasoningStreaming: false,
+          });
           return;
         }
         setActionErr(formatChatError(e));
         await refreshMessages(selectedSessionId, { silent: true });
       } finally {
-        setConfirmingId(null);
+        updateSessionStreamState(selectedSessionId, { confirmingId: null });
       }
     },
-    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, setWaitingForFirstToken],
+    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, updateSessionStreamState],
   );
 
   const patchBatchDecisions = useCallback(
@@ -1218,20 +1343,26 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       abortRef.current = ac;
 
       try {
-        setConfirmingId(assistantMessageId);
+        updateSessionStreamState(selectedSessionId, {
+          confirmingId: assistantMessageId,
+          streamPreview: "",
+          streamReasoning: "",
+          reasoningStreaming: false,
+          waitingForFirstToken: true,
+        });
         setActionErr(null);
-        setStreamPreview("");
-        setStreamReasoning("");
-        setReasoningStreaming(false);
-        resetThoughtClock();
-        setWaitingForFirstToken(true);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMessageId && m.batch_execution_state === "awaiting_quorum"
-              ? { ...m, batch_execution_state: "executing" }
-              : m,
-          ),
-        );
+        resetThoughtClock(selectedSessionId);
+        setMessages((prev) => {
+          const current = prev[selectedSessionId] || [];
+          return {
+            ...prev,
+            [selectedSessionId]: current.map((m) =>
+              m.id === assistantMessageId && m.batch_execution_state === "awaiting_quorum"
+                ? { ...m, batch_execution_state: "executing" }
+                : m,
+            ),
+          };
+        });
 
         await streamAgentChatToolBatchExecute(selectedSessionId, assistantMessageId, {
           signal: ac.signal,
@@ -1239,21 +1370,23 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         });
       } catch (e) {
         if ((e as Error).name === "AbortError") {
-          setStreamPreview("");
-          setStreamReasoning("");
-          setReasoningStreaming(false);
+          updateSessionStreamState(selectedSessionId, {
+            streamPreview: "",
+            streamReasoning: "",
+            reasoningStreaming: false,
+          });
           return;
         }
         setActionErr(formatChatError(e));
         await refreshMessages(selectedSessionId, { silent: true });
       } finally {
-        setConfirmingId(null);
+        updateSessionStreamState(selectedSessionId, { confirmingId: null });
       }
     },
-    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, setWaitingForFirstToken],
+    [selectedSessionId, confirmingId, attachStreamHandlers, refreshMessages, resetThoughtClock, updateSessionStreamState],
   );
 
-  const visibleMessages = optimisticMessages.length > 0 ? [...messages, ...optimisticMessages] : messages;
+  const visibleMessages = currentOptimisticMessages.length > 0 ? [...currentMessages, ...currentOptimisticMessages] : currentMessages;
   const streamPreviewText = streamPreview.trim();
   const persistedAssistantHasStreamPreview =
     streamPreviewText.length > 0 &&
