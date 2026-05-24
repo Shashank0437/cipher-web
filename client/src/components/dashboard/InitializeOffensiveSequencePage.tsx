@@ -1629,8 +1629,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       const hasThinking = Boolean((m.thinking_content ?? "").trim());
                       const hasPendingToolCall = m.tool_call && String(m.tool_call.state) === "pending" && !batchPanelOpen(m);
                       const hasBatchPanel = batchPanelOpen(m);
-                      
-                      if (hasSubsequent && !hasThinking && !hasPendingToolCall && !hasBatchPanel) {
+                      const isAutoExecuted = m.tool_call && String(m.tool_call.state) !== "pending" && String(m.tool_call.run_status ?? "").trim();
+                      if (hasSubsequent && !hasThinking && !hasPendingToolCall && !hasBatchPanel && !isAutoExecuted) {
                         return null;
                       }
                     }
@@ -2045,6 +2045,51 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                                     Approvals require the tenant administrator role. You can still reject.
                                   </p>
                                 ) : null}
+                                </div>
+                              </div>
+                            );
+                          })()
+                        : null}
+                      {/* Compact card for auto-executed (non-pending) tool calls */}
+                      {m.role === "assistant" &&
+                      m.tool_call &&
+                      String(m.tool_call.state) !== "pending" &&
+                      String(m.tool_call.run_status ?? "").trim() &&
+                      !batchPanelOpen(m)
+                        ? (() => {
+                            const tc = m.tool_call;
+                            const rs = String(tc.run_status ?? "").toLowerCase();
+                            const isDone = rs === "done";
+                            const isError = rs === "error";
+                            const toolName = String(tc.tool_name ?? "");
+                            const args = tc.arguments ?? {};
+                            const argsStr = JSON.stringify(args);
+                            const hasArgs = argsStr !== "{}" && argsStr !== "null";
+                            return (
+                              <div className="w-full max-w-md overflow-hidden rounded-xl border border-dashed border-primary/20 bg-surface-container-lowest/80">
+                                <div className="px-4 py-2.5">
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-[12px] font-bold text-primary">
+                                      Tool execution
+                                    </p>
+                                    <span className={`rounded-md px-1.5 py-0 text-[10px] font-semibold capitalize ${
+                                      isDone
+                                        ? "border border-emerald-800/35 bg-emerald-700 text-white shadow-sm"
+                                        : isError
+                                          ? "bg-error/15 text-error"
+                                          : "bg-surface-container-high text-on-surface"
+                                    }`}>
+                                      {rs}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
+                                    {toolName}
+                                  </p>
+                                  {hasArgs ? (
+                                    <pre className="mt-1.5 max-h-20 overflow-auto rounded-lg bg-surface-container-low/80 p-1.5 text-[10px] text-on-surface-variant">
+                                      {JSON.stringify(args, null, 2)}
+                                    </pre>
+                                  ) : null}
                                 </div>
                               </div>
                             );
