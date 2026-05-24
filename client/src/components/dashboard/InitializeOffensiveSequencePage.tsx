@@ -2089,7 +2089,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       <span className="mt-0.5 inline-block h-3 w-1 animate-pulse rounded-full bg-primary align-middle" />
                     </div>
                   ) : null}
-                  {waitingForFirstToken && (
+                  {(waitingForFirstToken || (agentActivelyWorking && !visibleStreamPreview && !reasoningStreaming)) && (
                     <div className="mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)] py-2 text-left">
                       <div className="max-w-[140px] opacity-90">
                         <svg width="100%" viewBox="0 0 680 200" role="img" xmlns="http://www.w3.org/2000/svg">
