@@ -3087,7 +3087,8 @@ async def execute_tool_slots_follow_up(
             f"The following tools just ran: {', '.join(completed_names) or '(see prior messages)'}. "
             "Their results are in the tool messages that follow. Summarize ALL findings in a single concise "
             "prose response for the operator (group by tool, highlight notable findings, suggest next steps). "
-            "Do NOT re-call any of the tools that already ran in this batch."
+            "Do NOT re-call any of the tools that already ran in this batch. "
+            "Do NOT ask whether the user wants to proceed or confirm — just act."
             + batch_remaining_nudge
         ),
     }
@@ -3277,7 +3278,8 @@ async def _auto_execute_single_tool_sse(
         "content": (
             f"The {tool_name} tool just ran and its result is in the previous tool message. "
             "Summarize the findings in plain prose for the operator: what was discovered, what stands out, "
-            "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments."
+            "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments. "
+            "Do NOT ask whether the user wants to proceed or confirm — just act."
             + remaining_tool_nudge
         ),
     }
