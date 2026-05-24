@@ -3077,7 +3077,9 @@ async def execute_tool_slots_follow_up(
             f" You still have these tools available: {', '.join(batch_remaining_names)}. "
             "If the user's ORIGINAL message requested actions that match any of these remaining tools "
             "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
-            "in this turn — do NOT ask the user for confirmation. The user already requested it."
+            "by emitting a tool_call in this SAME response alongside your summary text. "
+            "Do NOT ask the user for confirmation or say 'shall I proceed' or 'would you like me to' — "
+            "the user ALREADY requested it in their original message. Just summarize and call the tool."
         )
     batch_summarize_system = {
         "role": "system",
@@ -3266,7 +3268,9 @@ async def _auto_execute_single_tool_sse(
             f" You still have these tools available: {', '.join(remaining_tool_names)}. "
             "If the user's ORIGINAL message requested actions that match any of these remaining tools "
             "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
-            "in this turn — do NOT ask the user for confirmation. The user already requested it."
+            "by emitting a tool_call in this SAME response alongside your summary text. "
+            "Do NOT ask the user for confirmation or say 'shall I proceed' or 'would you like me to' — "
+            "the user ALREADY requested it in their original message. Just summarize and call the tool."
         )
     summarize_system = {
         "role": "system",
