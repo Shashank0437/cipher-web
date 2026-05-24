@@ -3076,17 +3076,19 @@ async def execute_tool_slots_follow_up(
         batch_remaining_nudge = (
             f" You still have these tools available: {', '.join(batch_remaining_names)}. "
             "If the user's ORIGINAL message requested actions that match any of these remaining tools "
-            "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
-            "by emitting a tool_call in this SAME response alongside your summary text. "
-            "Do NOT ask the user for confirmation or say 'shall I proceed' or 'would you like me to' — "
-            "the user ALREADY requested it in their original message. Just summarize and call the tool."
+            "(e.g. 'generate report', 'create pdf', 'penetration report', or running more scans/tools), "
+            "you MUST call them NOW by emitting a tool_call in this SAME response. "
+            "CRITICAL: You MUST write the summary of completed findings in your conversational text content "
+            "AND emit the tool_calls for the remaining tools in the same response. Do not omit the summary."
         )
     batch_summarize_system = {
         "role": "system",
         "content": (
             f"The following tools just ran: {', '.join(completed_names) or '(see prior messages)'}. "
-            "Their results are in the tool messages that follow. Summarize ALL findings in a single concise "
-            "prose response for the operator (group by tool, highlight notable findings, suggest next steps). "
+            "Their results are in the tool messages that follow. "
+            "CRITICAL: You MUST write a clear, detailed summary of all findings from these completed tools in your text response. "
+            "Do NOT output only tool calls. Group findings by tool, highlight notable vulnerabilities or open ports, "
+            "and outline what was discovered. "
             "Do NOT re-call any of the tools that already ran in this batch. "
             "Do NOT ask whether the user wants to proceed or confirm — just act."
             + batch_remaining_nudge
@@ -3268,17 +3270,18 @@ async def _auto_execute_single_tool_sse(
         remaining_tool_nudge = (
             f" You still have these tools available: {', '.join(remaining_tool_names)}. "
             "If the user's ORIGINAL message requested actions that match any of these remaining tools "
-            "(e.g. 'generate report', 'create pdf', 'penetration report'), you MUST call them NOW "
-            "by emitting a tool_call in this SAME response alongside your summary text. "
-            "Do NOT ask the user for confirmation or say 'shall I proceed' or 'would you like me to' — "
-            "the user ALREADY requested it in their original message. Just summarize and call the tool."
+            "(e.g. 'generate report', 'create pdf', 'penetration report', or running more scans/tools), "
+            "you MUST call them NOW by emitting a tool_call in this SAME response. "
+            "CRITICAL: You must write the summary of completed findings in your conversational text content "
+            "AND emit the tool_calls for the remaining tools in the same response. Do not omit the summary."
         )
     summarize_system = {
         "role": "system",
         "content": (
             f"The {tool_name} tool just ran and its result is in the previous tool message. "
-            "Summarize the findings in plain prose for the operator: what was discovered, what stands out, "
-            "and what (if anything) to do next. Do NOT re-call the same tool with the same arguments. "
+            "CRITICAL: You MUST write a clear, detailed summary of all findings from this completed tool in your text response. "
+            "Do NOT output only tool calls. Detail what was discovered and highlight notable findings. "
+            "Do NOT re-call the same tool with the same arguments. "
             "Do NOT ask whether the user wants to proceed or confirm — just act."
             + remaining_tool_nudge
         ),
