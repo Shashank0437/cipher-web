@@ -1028,6 +1028,9 @@ async def _strip_store_report_pdf_after_agent_json(
         return
     db, organization_id, user_id, session_id = chat_tool_context
     fn = str(result_obj.get("filename") or "penetration_report.pdf").strip() or "penetration_report.pdf"
+    # Remove filename from the result so the LLM doesn't echo it as a download link;
+    # the frontend attachment card is the sole download affordance.
+    result_obj.pop("filename", None)
     try:
         aid = await persist_agent_chat_pdf_attachment(
             db,
