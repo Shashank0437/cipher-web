@@ -172,7 +172,7 @@ export function DashboardUsersManagement() {
               </button>
             </div>
             <p className="mt-2 text-sm text-on-surface-variant">
-              They will receive an email to accept and choose a password. Existing CipherStrike accounts are not inviteable here.
+              They will receive an email to accept and choose a password. Existing Vrika accounts are not inviteable here.
             </p>
             <form onSubmit={onInvite} className="mt-6 space-y-4">
               {formError ? (

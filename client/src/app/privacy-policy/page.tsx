@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { MarketingSubpage } from "@/components/layout/MarketingSubpage";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy | CipherStrike",
-  description: "How CipherStrike handles personal and operational information.",
+  title: "Privacy Policy | Vrika",
+  description: "How Vrika handles personal and operational information.",
 };
 
 export default function PrivacyPolicyPage() {
@@ -23,7 +23,7 @@ export default function PrivacyPolicyPage() {
       ]}
     >
       <p>
-        This Privacy Policy explains how CipherStrike collects, processes, transfers, stores, or deletes (&quot;processes&quot;)
+        This Privacy Policy explains how Vrika collects, processes, transfers, stores, or deletes (&quot;processes&quot;)
         information when you use our websites, authentications portals, SaaS workspaces, binaries, integrations, telemetry
         channels, support channels, sales interactions, marketing forms, trials, proofs-of-concept, or training assets
         (&quot;Services&quot;). It complements enterprise Data Processing Agreements where those exist.
@@ -32,7 +32,7 @@ export default function PrivacyPolicyPage() {
       <h2 id="who">Who processes data?</h2>
       <p>
         The entity identified in your invoice, Terms of Subscription, pilot agreement, master services agreement—or, if none
-        applies, CipherStrike Platforms Ltd. branded as CipherStrike—is the processor or controller depending on jurisdiction and
+        applies, Vrika Platforms Ltd. branded as Vrika—is the processor or controller depending on jurisdiction and
         your agreement.
       </p>
 
@@ -66,7 +66,7 @@ export default function PrivacyPolicyPage() {
 
       <h2 id="processors">Processors &amp; onward transfers</h2>
       <p>
-        CipherStrike leverages sub-processors for hosting, alerting, ticketing sync, SSO, transactional email. Current inventory is
+        Vrika leverages sub-processors for hosting, alerting, ticketing sync, SSO, transactional email. Current inventory is
         available on request and updated periodically. Customers may object to substitutions where contractually stipulated.
       </p>
       <p>
@@ -90,13 +90,13 @@ export default function PrivacyPolicyPage() {
 
       <h2 id="children">Children</h2>
       <p>
-        CipherStrike does not knowingly process information from children under 16 for consumer purposes—our offerings target
+        Vrika does not knowingly process information from children under 16 for consumer purposes—our offerings target
         professional security practitioners.
       </p>
 
       <h2 id="changes">Updates</h2>
       <p>
-        CipherStrike publishes revision dates atop this Policy. Continuing use constitutes acknowledgment except where regulators
+        Vrika publishes revision dates atop this Policy. Continuing use constitutes acknowledgment except where regulators
         require explicit consent for newly introduced processing.
       </p>
     </MarketingSubpage>

@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import { ToolsPageGate } from "@/components/tools/ToolsPageGate";
 
 export const metadata: Metadata = {
-  title: "Tools | CipherStrike",
+  title: "Tools | Vrika",
   description:
-    "Live tool registry availability from the CipherStrike-backed agent probe — proxied securely through our API.",
+    "Live tool registry availability from the Vrika-backed agent probe — proxied securely through our API.",
 };
 
 export default function ToolsPage() {

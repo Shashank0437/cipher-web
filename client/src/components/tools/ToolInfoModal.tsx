@@ -111,7 +111,7 @@ export function ToolInfoModal({ tool, onClose }: ToolInfoModalProps) {
       >
         <div className="flex shrink-0 items-start justify-between gap-4 border-b border-outline-variant px-5 py-4 sm:px-6">
           <div className="min-w-0 flex-1 pr-2">
-            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary">CipherStrike arsenal</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary">Vrika arsenal</p>
             <h2 id={titleId} className="mt-2 text-xl font-bold tracking-tight text-on-surface sm:text-2xl">
               {tool.name}
             </h2>

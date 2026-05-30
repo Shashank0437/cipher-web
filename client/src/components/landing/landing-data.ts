@@ -45,7 +45,7 @@ export const FEATURE_BANDS: FeatureBand[] = [
   {
     kicker: "Live telemetry",
     title: "API and console in one strategy",
-    body: "Correlate raw HTTP chatter with shell transcripts and ticket context. CipherStrike merges signals so analysts never lose the plot mid-engagement.",
+    body: "Correlate raw HTTP chatter with shell transcripts and ticket context. Vrika merges signals so analysts never lose the plot mid-engagement.",
     video: false,
   },
   {
@@ -82,15 +82,15 @@ export const INTEL_CARDS = [
 
 export const FAQ_ITEMS = [
   {
-    q: "How does CipherStrike shorten long red-team cycles?",
+    q: "How does Vrika shorten long red-team cycles?",
     a: "Specialized agents own recon, chaining, exploitation, and reporting concurrently. Humans approve escalations while automation keeps proofs and timelines synchronized.",
   },
   {
-    q: "Does CipherStrike replace my existing toolchain?",
-    a: "No—it orchestrates the binaries your team already trusts. Keep your preferred distros while CipherStrike brokers execution, transcripts, and evidence.",
+    q: "Does Vrika replace my existing toolchain?",
+    a: "No—it orchestrates the binaries your team already trusts. Keep your preferred distros while Vrika brokers execution, transcripts, and evidence.",
   },
   {
-    q: "Who should operate CipherStrike?",
+    q: "Who should operate Vrika?",
     a: "Mature offensive security shops, MSSP reds, and product security teams exercising continuous assurance—only inside environments you legally control.",
   },
   {
@@ -103,7 +103,7 @@ export const FAQ_ITEMS = [
   },
 ] as const;
 
-/** Google's sample CDN clips — replace with CipherStrike-produced media when ready. */
+/** Google's sample CDN clips — replace with Vrika-produced media when ready. */
 export const SAMPLE_VIDEOS = {
   blaze: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
   escapes: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",

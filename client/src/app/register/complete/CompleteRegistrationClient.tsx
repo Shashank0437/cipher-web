@@ -80,7 +80,12 @@ export function CompleteRegistrationClient() {
     <AuthSplitLayout>
       <div className="mx-auto w-full max-w-[400px]">
         <header className="mb-8">
-          <p className="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">CipherStrike</p>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/logo_with_text.png"
+            alt="Vrika"
+            className="h-10 w-auto object-contain"
+          />
           <h1 className="mt-3 text-2xl font-semibold tracking-tight text-neutral-900 sm:text-[1.75rem]">Create your password</h1>
           <p className="mt-2 text-[15px] leading-relaxed text-neutral-500">
             You’re approved—choose a strong password to activate your organization workspace.

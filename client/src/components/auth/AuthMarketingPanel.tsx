@@ -24,7 +24,12 @@ export function AuthMarketingPanel() {
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.7)_0%,transparent_55%)]" />
 
       <div className="relative">
-        <p className="text-[11px] font-bold uppercase tracking-[0.4em] text-primary">CipherStrike</p>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo_with_text.png"
+          alt="Vrika"
+          className="h-10 w-auto object-contain"
+        />
         <h2 className="mt-6 max-w-sm text-3xl font-semibold leading-[1.15] tracking-tight text-neutral-900 lg:text-[2rem]">
           Offensive security, orchestrated.
         </h2>
@@ -50,7 +55,7 @@ export function AuthMarketingPanel() {
 
       <div className="relative mt-12 border-t border-outline-variant/80 pt-8 lg:mt-0">
         <p className="text-[11px] leading-relaxed text-neutral-500">
-          Use only in environments you legally control. CipherStrike is for authorized security testing—not unauthorized access.
+          Use only in environments you legally control. Vrika is for authorized security testing—not unauthorized access.
         </p>
         <Link
           href="/"

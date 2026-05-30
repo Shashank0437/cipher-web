@@ -213,7 +213,7 @@ export type AgentChatToolBatchSlotProgressPayload = {
   run_finished_at?: string | null;
 };
 
-/** Parsed SSE payloads from POST …/messages and …/tool-confirm (CipherStrike agent chat). */
+/** Parsed SSE payloads from POST …/messages and …/tool-confirm (Vrika agent chat). */
 export type AgentChatSseEvent =
   | { type: "thinking" }
   | { type: "thinking_token"; text: string }

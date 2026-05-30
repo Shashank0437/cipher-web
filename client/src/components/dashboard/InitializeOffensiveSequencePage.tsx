@@ -432,7 +432,7 @@ type ClaudePromptBoxProps = {
   placeholder?: string;
 };
 
-function CipherStrikeClaudePromptBox({
+function VrikaClaudePromptBox({
   textareaId,
   prompt,
   onPromptChange,
@@ -1519,11 +1519,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         <header className="sticky top-0 z-40 flex shrink-0 items-start justify-between gap-4 border-b border-outline-variant bg-background/95 px-4 py-4 backdrop-blur-sm sm:px-6 lg:px-8 xl:px-10">
           <div className="min-w-0 pt-0.5">
             <h1 className="text-lg font-black leading-tight tracking-tight text-on-surface md:text-xl">
-              CipherStrike{" "}
+              Vrika{" "}
               <span className="font-bold text-on-surface-variant">| Agentic Workspace</span>
             </h1>
             <p className="mt-1 text-[12px] text-on-surface-variant md:text-[13px]">
-              CipherStrike v1.0.0 — Offensive AI Subsystem
+              Vrika v1.0.0 — Offensive AI Subsystem
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-4">
@@ -2174,7 +2174,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                   </div>
                 ) : null}
                 <div className="mx-auto w-[min(100%,60%)] min-w-0">
-                  <CipherStrikeClaudePromptBox
+                  <VrikaClaudePromptBox
                     textareaId="offensive-prompt"
                     prompt={prompt}
                     onPromptChange={setPrompt}
@@ -2198,7 +2198,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                 <AgentWorkingComposerStrip />
               </div>
             ) : null}
-            <CipherStrikeClaudePromptBox
+            <VrikaClaudePromptBox
               textareaId="offensive-prompt-empty"
               prompt={prompt}
               onPromptChange={setPrompt}

@@ -93,13 +93,12 @@ export function DashboardShell({ children }: { children: ReactNode }) {
       <aside className="sticky top-0 flex h-[100dvh] max-h-[100dvh] w-64 min-w-64 max-w-64 shrink-0 flex-col overflow-hidden border-r border-outline-variant bg-surface-container-low">
         <div className="shrink-0 px-6 pb-2 pt-6">
           <Link href="/dashboard" className="flex items-center gap-3 rounded-lg transition hover:opacity-95">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary">
-              <MaterialSymbol name="shield" className="text-lg text-on-primary" filled />
-            </div>
-            <div className="min-w-0 text-left">
-              <h2 className="leading-none font-black tracking-tighter text-on-surface">CipherStrike</h2>
-              <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-outline">Offensive Security</p>
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo_with_text.png"
+              alt="Vrika"
+              className="h-10 w-auto object-contain"
+            />
           </Link>
         </div>
 

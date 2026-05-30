@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import { CompleteRegistrationClient } from "./CompleteRegistrationClient";
 
 export const metadata: Metadata = {
-  title: "Complete registration | CipherStrike",
-  description: "Set your password and enter the CipherStrike workspace.",
+  title: "Complete registration | Vrika",
+  description: "Set your password and enter the Vrika workspace.",
 };
 
 export default function CompleteRegistrationPage() {

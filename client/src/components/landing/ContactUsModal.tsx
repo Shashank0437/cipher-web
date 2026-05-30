@@ -107,7 +107,7 @@ export function ContactUsModal({ open, onClose }: ContactUsModalProps) {
               Contact us
             </h2>
             <p className="mt-1 text-sm leading-relaxed text-neutral-500">
-              Tell us about your team—we’ll follow up about CipherStrike access and demos.
+              Tell us about your team—we’ll follow up about Vrika access and demos.
             </p>
           </div>
           <button

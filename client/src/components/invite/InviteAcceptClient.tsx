@@ -101,7 +101,7 @@ export function InviteAcceptClient() {
         <span className="pointer-events-none absolute -left-20 top-56 hidden size-64 rounded-full bg-gradient-to-tr from-cyan-300/35 to-transparent blur-2xl lg:block" />
         <div className="relative rounded-[1.65rem] border border-purple-500/25 bg-[linear-gradient(135deg,#f9f8ff,#ffffff)] px-8 py-10 shadow-[0_20px_50px_-12px_rgba(104,76,182,0.25)] backdrop-blur">
           <div className="inline-flex rounded-full bg-primary-container px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-on-primary-container">
-            CipherStrike invite
+            Vrika invite
           </div>
           <h1 className="mt-5 text-[1.75rem] font-bold leading-snug tracking-tight text-neutral-900">
             <span className="text-purple-950">{data.inviter_display}</span>
@@ -142,7 +142,7 @@ export function InviteAcceptClient() {
             <MaterialSymbol name="arrow_forward" className="text-lg" filled />
           </Link>
           <p className="mt-8 text-center text-[12px] leading-relaxed text-neutral-400 lg:text-left">
-            By continuing you create a CipherStrike workspace account under this organization&apos;s tenancy.
+            By continuing you create a Vrika workspace account under this organization&apos;s tenancy.
           </p>
         </div>
       </div>

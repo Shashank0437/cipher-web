@@ -115,7 +115,7 @@ export function MarketingSubpage({
 
           {hasToc && breadcrumbLabel === "Legal" ? (
             <p className="col-span-full max-w-2xl text-sm leading-relaxed text-on-surface-variant lg:col-start-2">
-              CipherStrike publishes these documents for transparency. Formal agreements with your organization may supersede this
+              Vrika publishes these documents for transparency. Formal agreements with your organization may supersede this
               general language—confirm with counsel for production commitments.
             </p>
           ) : null}

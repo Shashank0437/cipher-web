@@ -1,6 +1,6 @@
 export type WorkspaceToolsOverview = {
   server: {
-    cipherstrike_api: string;
+    vrika_api: string;
     agent_reachable: boolean;
     agent_status: string | null;
     agent_message: string | null;

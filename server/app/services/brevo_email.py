@@ -29,9 +29,9 @@ def render_approval_email(
         "recipient_name": recipient_name,
         "company_name": company_name,
         "complete_url": complete_url,
-        "preheader": "Finish setting up your CipherStrike workspace.",
+        "preheader": "Finish setting up your Vrika workspace.",
     }
-    subject = "Your CipherStrike access request was approved"
+    subject = "Your Vrika access request was approved"
     return subject, html_t.render(**ctx), text_t.render(**ctx)
 
 
@@ -49,9 +49,9 @@ def render_invitation_email(
         "organization_name": organization_name,
         "inviter_display": inviter_display,
         "accept_url": accept_url,
-        "preheader": f"{inviter_display} invited you to join {organization_name} on CipherStrike.",
+        "preheader": f"{inviter_display} invited you to join {organization_name} on Vrika.",
     }
-    subject = f"You're invited to join {organization_name} on CipherStrike"
+    subject = f"You're invited to join {organization_name} on Vrika"
     return subject, html_t.render(**ctx), text_t.render(**ctx)
 
 
@@ -77,7 +77,7 @@ async def send_transactional_email(
         raise ValueError("No recipient addresses")
 
     payload: dict[str, object] = {
-        "sender": {"email": s.brevo_sender_email.strip(), "name": (s.brevo_sender_name or "CipherStrike").strip()},
+        "sender": {"email": s.brevo_sender_email.strip(), "name": (s.brevo_sender_name or "Vrika").strip()},
         "to": recipients,
         "subject": subject,
         "htmlContent": html,
@@ -138,9 +138,9 @@ def render_contact_admin_email(
         "message": message,
         "team_to_emails": team_to_emails,
         "team_to_line": ", ".join(team_to_emails),
-        "preheader": "New lead from the CipherStrike marketing site.",
+        "preheader": "New lead from the Vrika marketing site.",
     }
-    subject = f"[CipherStrike] Contact: {first_name} {last_name}"
+    subject = f"[Vrika] Contact: {first_name} {last_name}"
     return subject, html_t.render(**ctx), text_t.render(**ctx)
 
 
@@ -151,5 +151,5 @@ def render_contact_thanks_email(*, first_name: str) -> tuple[str, str, str]:
         "first_name": first_name,
         "preheader": "We received your message and will be in touch.",
     }
-    subject = "Thanks for contacting CipherStrike"
+    subject = "Thanks for contacting Vrika"
     return subject, html_t.render(**ctx), text_t.render(**ctx)

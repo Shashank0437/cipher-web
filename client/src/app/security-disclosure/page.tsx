@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { MarketingSubpage } from "@/components/layout/MarketingSubpage";
 
 export const metadata: Metadata = {
-  title: "Security Disclosure | CipherStrike",
-  description: "CipherStrike security posture, monitoring commitments, and customer expectations.",
+  title: "Security Disclosure | Vrika",
+  description: "Vrika security posture, monitoring commitments, and customer expectations.",
 };
 
 export default function SecurityDisclosurePage() {
@@ -21,8 +21,8 @@ export default function SecurityDisclosurePage() {
       ]}
     >
       <p>
-        CipherStrike acknowledges that autonomous offensive tooling increases blast radius without rigorous controls. This
-        disclosure summarizes how CipherStrike safeguards its SaaS perimeter, hardened agent runtime, cryptography usage, tenant
+        Vrika acknowledges that autonomous offensive tooling increases blast radius without rigorous controls. This
+        disclosure summarizes how Vrika safeguards its SaaS perimeter, hardened agent runtime, cryptography usage, tenant
         isolation, anomaly detection, patching cadence philosophy, transparency expectations, plus how customers should compensate
         residual risk.
       </p>
@@ -64,7 +64,7 @@ export default function SecurityDisclosurePage() {
       <h2 id="customer">Customer responsibilities</h2>
       <p>
         You must maintain endpoint protection on operator laptops, segment lab networks, patch underlying hypervisors, disable
-        unused integrations, and rotate API keys. CipherStrike cannot guarantee safety if infrastructure outside our boundary is
+        unused integrations, and rotate API keys. Vrika cannot guarantee safety if infrastructure outside our boundary is
         neglected.
       </p>
 

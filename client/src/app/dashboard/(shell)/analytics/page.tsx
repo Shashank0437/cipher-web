@@ -6,7 +6,7 @@ export default function DashboardAnalyticsPage() {
       <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Analytics</p>
       <h1 className="mt-2 text-[1.75rem] font-bold tracking-tight text-on-surface">Operational analytics</h1>
       <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-on-surface-variant">
-        Breach-time trends, SLA posture, and executive rollups plug in here as the CipherStrike backend lands.
+        Breach-time trends, SLA posture, and executive rollups plug in here as the Vrika backend lands.
       </p>
       <div className="mt-12 flex aspect-video max-w-xl items-center justify-center rounded-2xl border border-dashed border-outline-variant bg-surface-container-low text-on-surface-variant">
         <div className="flex flex-col items-center gap-2 text-center px-8">

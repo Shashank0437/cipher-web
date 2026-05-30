@@ -8,7 +8,7 @@ import { LandingAuthLink, LandingHeroPrimaryCta } from "@/components/stitch/Land
 import { MaterialSymbol } from "@/components/ui/MaterialSymbol";
 import { FOOTER_PLATFORM_LINKS, FOOTER_RESOURCE_LINKS } from "@/lib/coming-soon-routes";
 
-/** Layout + narrative inspired by https://www.testmuai.com/kane-ai/ — CipherStrike branded, original copy. */
+/** Layout + narrative inspired by https://www.testmuai.com/kane-ai/ — Vrika branded, original copy. */
 const HERO_TEXTURE =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuBDVCqaAwavljXHCv6iy-HTkq_EFklP46KElPDexQUolB-7JQg-qUCDs1HGgESCJT5z4J-Iz3gcqrgYcCYHAEPP7Td8Yl7ItHXCYtWDp3gLVGn_yySXd245kX_mLVsof3x4yc8IEdzMUQ-C34-ugoq-eg8UhgICh1_CIglXcVDHRvz0vuCGaZTHvnJI7El2ZZ6Tc_BrKlzJeF2qB6K36Ufa0eKzfI2lw0_FD5NclVXkbkw0ZDWuKo-3VIb0UA_c3AfW-cacCE3uoWI";
 
@@ -25,7 +25,7 @@ const TOOL_CHIPS: { icon: string; label: string }[] = [
   { icon: "lan", label: "WIRESHARK" },
 ];
 
-const FOOTER_COPYRIGHT = "© 2026 CipherStrike. All rights reserved.";
+const FOOTER_COPYRIGHT = "© 2026 Vrika. All rights reserved.";
 
 const FOOTER_LEGAL_LINKS = [
   { href: "/terms-of-use", label: "Terms of Use" },
@@ -121,11 +121,11 @@ export function StitchLandingPage() {
                     <div className="h-3 w-3 rounded-full bg-amber-400/70" />
                     <div className="h-3 w-3 rounded-full bg-emerald-400/70" />
                   </div>
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-white/40">cipherstrike-v2.0 // mesh</span>
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-white/40">vrika-v2.0 // mesh</span>
                 </div>
                 <div className="min-h-[320px] space-y-4 p-6 font-mono text-sm text-white/90">
                   <div className="flex flex-wrap gap-2">
-                    <span className="text-[#c4b5fd]">root@cipherstrike:~$</span>
+                    <span className="text-[#c4b5fd]">root@vrika:~$</span>
                     <span>orchestrate --cluster=shadow --scope=prod-sim</span>
                   </div>
                   <div className="text-emerald-400">[OK] Policy mesh synchronized. Human gates armed.</div>
@@ -184,7 +184,7 @@ export function StitchLandingPage() {
               {[
                 { icon: "verified_user", name: "SENTINEL" },
                 { icon: "token", name: "VOIDSEC" },
-                { icon: "hive", name: "CIPHERSTRIKE" },
+                { icon: "hive", name: "VRIKA" },
                 { icon: "layers", name: "PHANTOM.IO" },
                 { icon: "radar", name: "NETSTRIKE" },
               ].map((b) => (
@@ -426,10 +426,12 @@ export function StitchLandingPage() {
           <div className="mb-16 grid grid-cols-2 gap-12 md:grid-cols-4 lg:grid-cols-5">
             <div className="col-span-2">
               <div className="mb-6 flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary">
-                  <MaterialSymbol name="security" filled className="text-on-primary text-2xl" />
-                </div>
-                <span className="text-2xl font-black tracking-tighter text-on-surface uppercase">CipherStrike</span>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/logo_with_text.png"
+                  alt="Vrika"
+                  className="h-[80px] md:h-[96px] w-auto object-contain"
+                />
               </div>
               <p className="max-w-xs leading-relaxed text-on-surface-variant">
                 Autonomous offensive security with adult supervision—the way modern enterprises demand.

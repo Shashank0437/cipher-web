@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CipherStrike",
+  title: "Vrika",
   description: "Autonomous offensive security operations platform",
 };
 

@@ -2,14 +2,14 @@ import type { Metadata } from "next";
 import { MarketingSubpage } from "@/components/layout/MarketingSubpage";
 
 export const metadata: Metadata = {
-  title: "About | CipherStrike",
-  description: "Mission, posture, and who CipherStrike is built for.",
+  title: "About | Vrika",
+  description: "Mission, posture, and who Vrika is built for.",
 };
 
 export default function AboutPage() {
   return (
     <MarketingSubpage
-      title="About CipherStrike"
+      title="About Vrika"
       eyebrow="Company"
       lastUpdated="May 8, 2026"
       breadcrumbLabel="Company"
@@ -21,7 +21,7 @@ export default function AboutPage() {
       ]}
     >
       <p className="lead-intro text-on-surface">
-        CipherStrike exists so elite security teams can orchestrate aggressive validation programs without drowning in glue code.
+        Vrika exists so elite security teams can orchestrate aggressive validation programs without drowning in glue code.
         We pair specialized agents with the binaries operators already trust—Metasploit, Nmap, Burp-family workers, custom CLIs—so
         every engagement produces consistent telemetry, human-readable narratives, and evidence suited for executives and
         auditors alike.
@@ -30,7 +30,7 @@ export default function AboutPage() {
       <h2 id="mission">Mission</h2>
       <p>
         Speed up authorized offensive security while raising the bar on supervision. Automation should expand coverage, not hide
-        recklessness: CipherStrike bakes policy gates, immutable logs, and operator checkpoints into the fabric of every cluster.
+        recklessness: Vrika bakes policy gates, immutable logs, and operator checkpoints into the fabric of every cluster.
       </p>
 
       <h2 id="who">Who we serve</h2>
@@ -56,7 +56,7 @@ export default function AboutPage() {
 
       <h2 id="contact">Contact</h2>
       <p>
-        Media, partnership, or procurement inquiries should route through your CipherStrike account manager or the contact form
+        Media, partnership, or procurement inquiries should route through your Vrika account manager or the contact form
         published on this site once live. For security-sensitive topics, use the Responsible Disclosure channel.
       </p>
     </MarketingSubpage>

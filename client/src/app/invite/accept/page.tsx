@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { InviteAcceptClient } from "@/components/invite/InviteAcceptClient";
 
 export const metadata: Metadata = {
-  title: "Invitation | CipherStrike",
+  title: "Invitation | Vrika",
 };
 
 export default function InviteAcceptPage() {

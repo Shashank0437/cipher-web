@@ -15,10 +15,10 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { slug } = await params;
   const s = slug as ComingSoonSlug;
-  if (!COMING_SOON_PAGES[s]) return { title: "Not found | CipherStrike" };
+  if (!COMING_SOON_PAGES[s]) return { title: "Not found | Vrika" };
   const p = COMING_SOON_PAGES[s];
   return {
-    title: `${p.title} — Coming soon | CipherStrike`,
+    title: `${p.title} — Coming soon | Vrika`,
     description: p.teaser,
   };
 }

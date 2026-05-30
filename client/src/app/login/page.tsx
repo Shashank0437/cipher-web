@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import { AuthShell } from "./AuthShell";
 
 export const metadata: Metadata = {
-  title: "Sign in | CipherStrike",
-  description: "Sign in or request access to the CipherStrike workspace.",
+  title: "Sign in | Vrika",
+  description: "Sign in or request access to the Vrika workspace.",
 };
 
 export default function LoginPage() {

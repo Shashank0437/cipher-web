@@ -54,7 +54,7 @@ export const COMING_SOON_PAGES: Record<
     category: "Resources",
     title: "Support",
     teaser:
-      "Human support channels, SLA guidance, and escalation paths for CipherStrike workspaces—opening soon as we finalize partner coverage.",
+      "Human support channels, SLA guidance, and escalation paths for Vrika workspaces—opening soon as we finalize partner coverage.",
     highlights: ["Priority channels", "Runbook-backed triage", "Tenant-scoped ticketing"],
   },
   "security-research": {
@@ -68,7 +68,7 @@ export const COMING_SOON_PAGES: Record<
     category: "Resources",
     title: "API surface",
     teaser:
-      "Programmatic hooks for workspaces, artefacts, approvals, and webhooks—ideal for tying CipherStrike into your existing SOAR, CI, or custom panels.",
+      "Programmatic hooks for workspaces, artefacts, approvals, and webhooks—ideal for tying Vrika into your existing SOAR, CI, or custom panels.",
     highlights: ["Versioned schemas", "Idempotent workflows", "Webhooks & streaming"],
   },
   community: {

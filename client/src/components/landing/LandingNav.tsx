@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ContactUsModal } from "@/components/landing/ContactUsModal";
 import { LandingAuthLink, LandingHeroPrimaryCta } from "@/components/stitch/LandingAuthCta";
-import { MaterialSymbol } from "@/components/ui/MaterialSymbol";
 
 export function LandingNav() {
   const [elevated, setElevated] = useState(false);
@@ -26,15 +25,13 @@ export function LandingNav() {
       }`}
     >
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
-        <Link href="/" className="flex items-center gap-2 font-black tracking-tight uppercase">
-          <span
-            className={`flex size-10 items-center justify-center rounded-lg ${
-              elevated ? "bg-primary text-on-primary" : "bg-white/15 text-white"
-            }`}
-          >
-            <MaterialSymbol name="security" filled className="text-2xl" />
-          </span>
-          <span className={`text-lg ${elevated ? "text-on-surface" : "text-white"}`}>CipherStrike</span>
+        <Link href="/" className="flex items-center gap-2">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/logo_with_text.png"
+            alt="Vrika"
+            className="h-[64px] md:h-[72px] w-auto object-contain"
+          />
         </Link>
         <nav className="hidden items-center gap-8 text-sm font-semibold md:flex">
           <a href="#demo" className={elevated ? "text-on-surface-variant hover:text-primary" : "text-white/80 hover:text-white"}>

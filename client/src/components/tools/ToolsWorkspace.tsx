@@ -267,10 +267,10 @@ export function ToolsWorkspace({ intro = "full" }: { intro?: ToolsWorkspaceIntro
       <ToolHistoryModal toolName={historyToolName} onClose={() => setHistoryToolName(null)} />
       {intro === "full" ? (
         <>
-          <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-primary">CipherStrike arsenal</p>
+          <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-primary">Vrika arsenal</p>
           <h1 className="mt-2 text-[2rem] font-bold tracking-tight text-on-surface">Tools workspace</h1>
           <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-on-surface-variant">
-            Orchestration probes are proxied through the CipherStrike API. The NyxStrike agent never exposes arbitrary
+            Orchestration probes are proxied through the Vrika API. The NyxStrike agent never exposes arbitrary
             callers on your port-forward boundary.
           </p>
         </>
@@ -333,8 +333,8 @@ export function ToolsWorkspace({ intro = "full" }: { intro?: ToolsWorkspaceIntro
           </div>
           <dl className="mt-4 space-y-1 text-[13px] text-on-surface-variant">
             <div className="flex justify-between gap-2">
-              <dt>CipherStrike API</dt>
-              <dd className="font-semibold text-on-surface">{data?.overview.server.cipherstrike_api ?? "—"}</dd>
+              <dt>Vrika API</dt>
+              <dd className="font-semibold text-on-surface">{data?.overview.server.vrika_api ?? "—"}</dd>
             </div>
             <div className="flex justify-between gap-2">
               <dt>Agent</dt>

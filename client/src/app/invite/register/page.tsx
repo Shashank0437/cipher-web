@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { InviteRegisterClient } from "@/components/invite/InviteRegisterClient";
 
 export const metadata: Metadata = {
-  title: "Complete invitation | CipherStrike",
+  title: "Complete invitation | Vrika",
 };
 
 export default function InviteRegisterPage() {

@@ -1,7 +1,7 @@
 import { getApiBase } from "./env";
 import { bumpApiPending } from "./api-pending";
 
-const TOKEN_KEY = "cipherstrike_token";
+const TOKEN_KEY = "vrika_token";
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
