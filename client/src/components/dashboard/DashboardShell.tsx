@@ -97,7 +97,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             <img
               src="/logo_with_text.png"
               alt="Vrika"
-              className="h-10 w-auto object-contain"
+              className="h-14 w-auto object-contain"
             />
           </Link>
         </div>

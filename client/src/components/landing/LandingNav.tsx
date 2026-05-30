@@ -28,7 +28,7 @@ export function LandingNav() {
         <Link href="/" className="flex items-center gap-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src="/logo_with_text.png"
+            src={elevated ? "/logo_with_text.png" : "/logo_with_white_text.png"}
             alt="Vrika"
             className="h-[64px] md:h-[72px] w-auto object-contain"
           />
