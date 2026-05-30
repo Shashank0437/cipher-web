@@ -989,16 +989,16 @@ def attachments_from_tool_result_json(result_text: str) -> list[dict[str, Any]] 
     if not isinstance(obj, dict):
         return None
     aid = obj.get("attachment_id")
-    fn = obj.get("filename")
-    if aid and fn:
-        return [
-            {
-                "id": str(aid),
-                "filename": str(fn),
-                "content_type": "application/pdf",
-            }
-        ]
-    return None
+    if not aid:
+        return None
+    fn = obj.get("filename") or "penetration_report.pdf"
+    return [
+        {
+            "id": str(aid),
+            "filename": str(fn),
+            "content_type": "application/pdf",
+        }
+    ]
 
 
 async def _strip_store_report_pdf_after_agent_json(
