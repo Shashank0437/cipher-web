@@ -83,6 +83,40 @@ type Props = {
 };
 
 /** Renders model text as Markdown (bold, lists, code, links). Safe: no raw HTML execution. */
+/**
+ * Strip markdown links whose href matches an attachment filename so the
+ * separate attachment button card is the only download affordance.
+ * Handles both `[label](href)` and bare-URL lines that match a filename.
+ */
+function stripAttachmentLinks(
+  md: string,
+  attachments: AgentChatAttachment[] | null | undefined,
+): string {
+  if (!attachments || attachments.length === 0) return md;
+  const fnames = new Set(
+    attachments
+      .map((a) => (a.filename || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (fnames.size === 0) return md;
+
+  // Remove markdown links [text](href) where href matches an attachment filename
+  let result = md.replace(
+    /\[([^\]]*)\]\(([^)]+)\)/g,
+    (_match, _label: string, href: string) => {
+      const decoded = decodeURIComponent(href).trim().toLowerCase();
+      if (fnames.has(decoded) || [...fnames].some((f) => decoded.endsWith("/" + f) || f.endsWith("/" + decoded))) {
+        return "";
+      }
+      return _match;
+    },
+  );
+
+  // Clean up blank lines left behind
+  result = result.replace(/\n{3,}/g, "\n\n");
+  return result;
+}
+
 export function AgentChatMarkdown({
   text,
   className,
@@ -90,7 +124,7 @@ export function AgentChatMarkdown({
   attachments,
   onDownloadAttachment,
 }: Props) {
-  const trimmed = text.trim();
+  const trimmed = stripAttachmentLinks(text.trim(), attachments);
 
   const components = useMemo<Components>(() => ({
     p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
