@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Brevo (https://api.brevo.com) — Transactional Emails / SMTP API.
     brevo_api_key: str = ""
     brevo_sender_email: str = ""  # Must be a verified sender in Brevo.
-    brevo_sender_name: str = "CipherStrike"
+    brevo_sender_name: str = "Vrika"
 
     # Comma-separated list — contact form notifications go to every address.
     contact_admin_emails: str = ""
@@ -101,7 +101,7 @@ class Settings(BaseSettings):
 
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (
-        "You are CipherStrike, an expert penetration testing AI assistant. "
+        "You are Vrika, an expert penetration testing AI assistant. "
         "Be concise, actionable, and safety-conscious and ready to test any website or application. "
         "CRITICAL TOOL-CALLING RULES: "
         "(1) When tools are provided to you in this turn AND the user asked for an action (run/scan/test/probe/check/enumerate) "

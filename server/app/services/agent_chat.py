@@ -787,6 +787,7 @@ async def create_session(
     organization_id: ObjectId,
     user_id: ObjectId,
     title: str,
+    executed_by: str | None = None,
 ) -> dict[str, Any]:
     now = _utc_now()
     doc = {
@@ -796,6 +797,8 @@ async def create_session(
         "created_at": now,
         "updated_at": now,
     }
+    if executed_by:
+        doc["executed_by"] = executed_by
     res = await db[AGENT_CHAT_SESSIONS_COLLECTION].insert_one(doc)
     doc["_id"] = res.inserted_id
     return doc
@@ -814,7 +817,16 @@ async def list_sessions(
         .sort("updated_at", -1)
         .limit(limit)
     )
-    return await cur.to_list(length=limit)
+    rows = await cur.to_list(length=limit)
+    user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+    if user_ids:
+        users = await db.users.find({"_id": {"$in": user_ids}}).to_list(length=len(user_ids))
+        user_map = {u["_id"]: u.get("username") or u.get("email") or "Unknown" for u in users}
+        for r in rows:
+            uid = r.get("user_id")
+            if uid in user_map:
+                r["executed_by"] = user_map[uid]
+    return rows
 
 
 async def get_session_owned(
@@ -824,9 +836,16 @@ async def get_session_owned(
     user_id: ObjectId,
     session_id: ObjectId,
 ) -> dict[str, Any] | None:
-    return await db[AGENT_CHAT_SESSIONS_COLLECTION].find_one(
+    doc = await db[AGENT_CHAT_SESSIONS_COLLECTION].find_one(
         {"_id": session_id, "organization_id": organization_id},
     )
+    if doc:
+        uid = doc.get("user_id")
+        if uid:
+            user_doc = await db.users.find_one({"_id": uid})
+            if user_doc:
+                doc["executed_by"] = user_doc.get("username") or user_doc.get("email") or "Unknown"
+    return doc
 
 
 async def rename_session(

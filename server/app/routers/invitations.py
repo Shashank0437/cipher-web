@@ -37,7 +37,7 @@ async def preview_invitation(
         )
 
     org = await db.organizations.find_one({"_id": inv["organization_id"]})
-    org_name = org["name"] if org else "CipherStrike workspace"
+    org_name = org["name"] if org else "Vrika workspace"
 
     inviter = await db.users.find_one({"_id": inv["invited_by"]})
     if inviter:

@@ -105,7 +105,7 @@ async def create_invitation(
     if await db.users.find_one({"email": email_norm}):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            detail="That email already has a CipherStrike account. Invitation not sent.",
+            detail="That email already has a Vrika account. Invitation not sent.",
         )
 
     org_id = user["organization_id"]

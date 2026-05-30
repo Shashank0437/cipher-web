@@ -148,6 +148,7 @@ def _session_out(doc: dict) -> AgentChatSessionOut:
         input_tokens=int(doc.get("input_tokens") or 0),
         output_tokens=int(doc.get("output_tokens") or 0),
         num_calls=int(doc.get("num_calls") or 0),
+        executed_by=doc.get("executed_by"),
     )
 
 
@@ -231,6 +232,7 @@ async def create_chat_session(
         organization_id=user["organization_id"],
         user_id=user["_id"],
         title=title,
+        executed_by=user.get("username"),
     )
     return _session_out(doc)
 
@@ -276,6 +278,7 @@ async def get_chat_session_intelligence(
         )
     if not isinstance(intel, dict):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session intelligence not found")
+    intel["executed_by"] = sess.get("executed_by") or "Unknown"
     return AgentChatSessionIntelligenceOut(**intel)
 
 
@@ -396,7 +399,7 @@ async def generate_agent_chat_session_report(
     args: dict[str, Any] = {
         "client_name": title,
         "target_label": target_label,
-        "generated_by": "CipherStrike",
+        "generated_by": "Vrika",
     }
     started_at = _utc_now_iso()
 

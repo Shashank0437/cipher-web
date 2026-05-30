@@ -29,6 +29,7 @@ class AgentChatSessionOut(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     num_calls: int = 0
+    executed_by: str | None = None
 
 
 class AgentChatSessionIntelligenceOut(BaseModel):
@@ -49,6 +50,7 @@ class AgentChatSessionIntelligenceOut(BaseModel):
     completed_at: str | None = None
     replay_metadata: dict[str, Any] = Field(default_factory=dict)
     report_metadata: dict[str, Any] = Field(default_factory=dict)
+    executed_by: str | None = None
 
 
 class AgentChatOrgToolRow(BaseModel):

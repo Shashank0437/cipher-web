@@ -482,6 +482,15 @@ async def recalculate_session_intelligence(
     intel = derive_session_intelligence(session_doc, rows, ai_payload=ai_payload)
     if intel is None:
         return None
+
+    uid = session_doc.get("user_id")
+    executed_by = "Unknown"
+    if uid:
+        user_doc = await db.users.find_one({"_id": uid})
+        if user_doc:
+            executed_by = user_doc.get("username") or user_doc.get("email") or "Unknown"
+    intel["executed_by"] = executed_by
+
     await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
         {"_id": session_id, "organization_id": organization_id},
         {"$set": {"session_intelligence": intel, "updated_at": utc_now()}},
@@ -508,4 +517,17 @@ async def list_session_intelligence(
         .limit(limit)
         .to_list(length=limit)
     )
-    return [r.get("session_intelligence") for r in rows if isinstance(r.get("session_intelligence"), dict)]
+    user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+    user_map = {}
+    if user_ids:
+        users = await db.users.find({"_id": {"$in": user_ids}}).to_list(length=len(user_ids))
+        user_map = {u["_id"]: u.get("username") or u.get("email") or "Unknown" for u in users}
+
+    out = []
+    for r in rows:
+        intel = r.get("session_intelligence")
+        if isinstance(intel, dict):
+            uid = r.get("user_id")
+            intel["executed_by"] = user_map.get(uid, "Unknown")
+            out.append(intel)
+    return out
