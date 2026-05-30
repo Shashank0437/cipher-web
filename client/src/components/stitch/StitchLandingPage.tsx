@@ -428,7 +428,7 @@ export function StitchLandingPage() {
               <div className="mb-6 flex items-center gap-3">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src="/logo_with_text.png"
+                  src="/logo_with_text_with_shield.png"
                   alt="Vrika"
                   className="h-[80px] md:h-[96px] w-auto object-contain"
                 />

@@ -95,7 +95,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           <Link href="/dashboard" className="flex items-center gap-3 rounded-lg transition hover:opacity-95">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/logo_with_text.png"
+              src="/logo_with_text_with_shield.png"
               alt="Vrika"
               className="h-14 w-auto object-contain"
             />

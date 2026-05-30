@@ -26,7 +26,7 @@ export function AuthMarketingPanel() {
       <div className="relative">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/logo_with_text.png"
+          src="/logo_with_text_with_shield.png"
           alt="Vrika"
           className="h-10 w-auto object-contain"
         />
