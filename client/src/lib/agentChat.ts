@@ -11,6 +11,7 @@ export type AgentChatSession = {
   input_tokens?: number;
   output_tokens?: number;
   num_calls?: number;
+  executed_by?: string;
 };
 
 export type AgentChatSessionStatus = "IN_PROGRESS" | "COMPLETED" | "FAILED";
@@ -60,6 +61,7 @@ export type AgentChatSessionIntelligence = {
   completed_at?: string | null;
   replay_metadata?: Record<string, unknown>;
   report_metadata?: Record<string, unknown>;
+  executed_by?: string;
 };
 
 export type AgentChatToolCallState = {

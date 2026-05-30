@@ -83,6 +83,7 @@ export default function UsagePage() {
         s.title,
         sxId(s.id),
         s.id,
+        s.executed_by || "",
       ]
         .join(" ")
         .toLowerCase();
@@ -375,6 +376,12 @@ export default function UsagePage() {
                               <span className="text-on-surface-variant">Started At:</span>
                               <span className="text-on-surface">{formatDate(session.created_at)}</span>
                             </li>
+                            {session.executed_by ? (
+                              <li className="flex items-center justify-between border-b border-outline-variant/30 pb-1.5">
+                                <span className="text-on-surface-variant">Executed By:</span>
+                                <span className="text-on-surface font-semibold">{session.executed_by}</span>
+                              </li>
+                            ) : null}
                             <li className="flex items-center justify-between">
                               <span className="text-on-surface-variant">Last Active:</span>
                               <span className="text-on-surface">{formatDate(session.updated_at)}</span>

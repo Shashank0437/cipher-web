@@ -232,6 +232,7 @@ export function DashboardSessionsHome() {
         row.summary,
         sxId(row.session_id),
         row.session_id,
+        row.executed_by || "",
         ...row.targets,
         ...row.tools_used,
         ...row.findings.map((f) => `${f.name} ${f.affected_target} ${f.source_tool}`),
@@ -361,6 +362,7 @@ export function DashboardSessionsHome() {
                 <th className="px-5 py-3.5">Target</th>
                 <th className="px-5 py-3.5">Status</th>
                 <th className="px-5 py-3.5">Date started</th>
+                <th className="px-5 py-3.5">Executed By</th>
                 <th className="px-5 py-3.5">Findings</th>
                 <th className="px-5 py-3.5 text-right">Actions</th>
               </tr>
@@ -368,13 +370,13 @@ export function DashboardSessionsHome() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-5 py-12 text-center text-on-surface-variant">
+                  <td colSpan={6} className="px-5 py-12 text-center text-on-surface-variant">
                     Loading session intelligence…
                   </td>
                 </tr>
               ) : filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-5 py-12 text-center">
+                  <td colSpan={6} className="px-5 py-12 text-center">
                     <div className="mx-auto max-w-md">
                       <MaterialSymbol name="travel_explore" className="text-4xl text-primary" />
                       <p className="mt-3 text-[15px] font-bold text-on-surface">No completed tool sessions yet</p>
@@ -411,6 +413,7 @@ export function DashboardSessionsHome() {
                         </span>
                       </td>
                       <td className="px-5 py-4 text-on-surface-variant">{formatDate(r.started_at)}</td>
+                      <td className="px-5 py-4 text-on-surface-variant font-medium">{r.executed_by || "—"}</td>
                       <td className="px-5 py-4">
                         <div className="flex flex-wrap gap-1.5">
                           {chips.length === 0 ? (
@@ -549,6 +552,7 @@ export function DashboardSessionsHome() {
               <h3 className="text-[13px] font-bold uppercase tracking-wider text-on-surface-variant">Metadata</h3>
               <p className="mt-2 text-[13px] text-on-surface-variant">
                 Breach time {selected.average_time_to_breach} · Updated {formatDate(selected.updated_at)}
+                {selected.executed_by ? ` · Executed by: ${selected.executed_by}` : ""}
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
