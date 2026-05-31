@@ -1368,9 +1368,10 @@ def _assistant_row_to_openai(row: dict[str, Any], call_id: str) -> dict[str, Any
             if not tn:
                 continue
             decision = str(slot.get("human_decision") or "").lower()
-            # Skip slots that were never approved (so they don't appear as tool_calls without a
-            # matching tool-result message)
-            if decision == "reject":
+            # Skip slots that are not decided (pending human decision)
+            # so they don't appear as tool_calls without a matching tool-result message.
+            # Only include approved or explicitly rejected slots (which have tool result messages).
+            if decision not in ("approve", "reject"):
                 continue
             args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
             # Prefer persisted call_id (set by execute_tool_slots_follow_up at batch execution
