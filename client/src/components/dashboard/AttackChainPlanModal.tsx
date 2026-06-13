@@ -7,7 +7,6 @@ import {
   stepSelectionReason,
   type AttackChainPlan,
   type AttackChainPlanPreview,
-  type AttackChainPrecision,
 } from "@/lib/agentAttackChains";
 
 type AttackChainPlanModalProps = {
@@ -18,12 +17,6 @@ type AttackChainPlanModalProps = {
   starting?: boolean;
   error?: string | null;
 };
-
-const PRECISION_OPTIONS: { value: AttackChainPrecision; label: string }[] = [
-  { value: "quick", label: "Quick (faster, narrower coverage)" },
-  { value: "comprehensive", label: "Comprehensive (safer coverage)" },
-  { value: "stealth", label: "Stealth (lower noise)" },
-];
 
 function fmtPercent(n?: number | null) {
   return typeof n === "number" ? `${Math.round(n * 100)}%` : "n/a";
@@ -53,7 +46,6 @@ export function AttackChainPlanModal({
 }: AttackChainPlanModalProps) {
   const [target, setTarget] = useState("");
   const [note, setNote] = useState("");
-  const [precision, setPrecision] = useState<AttackChainPrecision>("comprehensive");
   const [preview, setPreview] = useState<AttackChainPlanPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -64,7 +56,6 @@ export function AttackChainPlanModal({
     if (open && plan) {
       setTarget("");
       setNote("");
-      setPrecision("comprehensive");
       setPreview(null);
       setPreviewError(null);
       setPreviewing(false);
@@ -84,7 +75,7 @@ export function AttackChainPlanModal({
     setPreviewError(null);
     try {
       const result = await previewAttackChainPlan(plan.id, target.trim(), {
-        objective: precision,
+        objective: "comprehensive",
         operatorNote: note,
       });
       if (!result.success) {
@@ -105,7 +96,7 @@ export function AttackChainPlanModal({
     setPreviewError(null);
     try {
       const result = await previewAttackChainPlan(plan.id, target.trim(), {
-        objective: precision,
+        objective: "comprehensive",
         operatorNote: note,
       });
       if (!result.success) {
@@ -155,47 +146,6 @@ export function AttackChainPlanModal({
 
         <div className="max-h-[min(70vh,640px)] space-y-4 overflow-y-auto px-5 py-4">
           <p className="text-[14px] leading-relaxed text-on-surface-variant">{plan.modal_description}</p>
-
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-wide text-on-surface-variant/80">Typical tooling</p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {isIntelligent && !preview ? (
-                <span className="rounded-md border border-outline-variant/70 bg-surface-container-high/80 px-2 py-0.5 text-[12px] font-medium text-on-surface-variant">
-                  none preloaded — AI selects after analysis
-                </span>
-              ) : null}
-              {(preview ? previewTools : plan.tools).map((t) => (
-                <span
-                  key={t}
-                  className="rounded-md border border-outline-variant/70 bg-surface-container-high/80 px-2 py-0.5 text-[12px] font-medium text-on-surface"
-                >
-                  {t}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {isIntelligent ? (
-            <div>
-              <label className="text-[13px] font-semibold text-on-surface" htmlFor="attack-chain-precision">
-                Precision
-              </label>
-              <select
-                id="attack-chain-precision"
-                value={precision}
-                onChange={(e) => {
-                  setPrecision(e.target.value as AttackChainPrecision);
-                  setPreview(null);
-                }}
-                disabled={busy}
-                className="mt-1.5 w-full rounded-xl border border-outline-variant/60 bg-surface-container-low px-3 py-2.5 text-[14px] text-on-surface outline-none focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
-              >
-                {PRECISION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-            </div>
-          ) : null}
 
           <div>
             <label className="text-[13px] font-semibold text-on-surface" htmlFor="attack-chain-target">
@@ -272,7 +222,6 @@ export function AttackChainPlanModal({
                 </div>
               ) : null}
               <div className="grid gap-1 text-[13px] text-on-surface-variant sm:grid-cols-2">
-                <p><span className="font-semibold text-on-surface">Objective:</span> {preview.objective ?? precision}</p>
                 <p><span className="font-semibold text-on-surface">Steps:</span> {preview.steps.length}</p>
                 <p><span className="font-semibold text-on-surface">Tools:</span> {previewTools.length}</p>
                 <p><span className="font-semibold text-on-surface">Risk:</span> {preview.risk_level ?? "unknown"}</p>

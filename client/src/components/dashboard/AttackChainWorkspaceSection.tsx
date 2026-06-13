@@ -55,7 +55,7 @@ export function AttackChainWorkspaceSection({ plans, onSelectPlan }: AttackChain
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary">
                     1
                   </span>
-                  Set target & precision
+                  Set your target
                 </li>
                 <li className="inline-flex items-center gap-1.5">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary">
