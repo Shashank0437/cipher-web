@@ -73,6 +73,7 @@ from app.services.agent_chat import (
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
     touch_session_ui_context,
+    _augment_follow_schemas_for_attack_chain,
     _run_one_tool_detailed,
     _slot_progress_payload,
     _sse_flush_tick,
@@ -89,6 +90,7 @@ from app.services.agent_attack_chains import (
     INTELLIGENT_ATTACK_CHAIN_ID,
     append_attack_chain_followup,
     attack_chain_execution_hint,
+    attack_chain_followup_context,
     attack_chain_next_tool_only,
     attack_chain_system_note,
     generate_attack_chain_followup,
@@ -1296,16 +1298,33 @@ async def tool_confirm_stream(
                 "role": "system",
                 "content": (
                     f"The {tool_name} tool just ran and its result is in the previous tool message. "
-                    "Your job NOW is to summarize the findings in plain prose for the operator: "
-                    "what was discovered, what stands out, and what (if anything) to do next. "
+                    "CRITICAL: You MUST write a clear, detailed summary of findings in your text response. "
                     "Do NOT re-call the same tool with the same arguments. "
-                    "If a different tool is genuinely needed, you may call it — otherwise, write a clear summary."
+                    "Do NOT ask whether the user wants to proceed or confirm — just act."
                 ),
             }
             follow_msgs = (
                 list(snapshot)
                 + [summarize_system]
                 + assistant_and_tool_result_pair(tool_name, args, result_text, call_id=str(aid))
+            )
+            fresh_rows = await list_messages(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+            )
+            ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess or {}, fresh_rows)
+            for ac_msg in reversed(ac_system):
+                follow_msgs.insert(0, ac_msg)
+            if ac_suffix:
+                summarize_system["content"] = summarize_system["content"] + ac_suffix
+            pruned_follow_schemas = await _augment_follow_schemas_for_attack_chain(
+                settings,
+                db,
+                user["organization_id"],
+                follow_batch_only,
+                pruned_follow_schemas,
             )
             await inject_followup_skills(
                 settings,
@@ -1320,6 +1339,7 @@ async def tool_confirm_stream(
                 session_id=sid,
                 llm_messages=follow_msgs,
                 tool_schemas=pruned_follow_schemas,
+                batch_only_tool_names=follow_batch_only,
                 batch_exclude_tool_names=frozenset({ran_tool_lower}),
             ):
                 yield chunk

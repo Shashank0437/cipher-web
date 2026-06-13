@@ -156,7 +156,6 @@ def attack_chain_system_note(
     """LLM instruction mirroring NyxStrike session workflow_steps order."""
     lines: list[str] = []
     if intelligent:
-        obj = (objective or "comprehensive").strip()
         source = (planner_source or "").strip()
         source_note = ""
         if source == "llm_hybrid":
@@ -166,7 +165,6 @@ def attack_chain_system_note(
         lines.append(
             "Intelligent attack chain (AI target profiling + planner)"
             f"{source_note}. "
-            f"Precision objective: {obj}. "
             "Execute tools strictly in the planned order below — one tool call per assistant turn."
         )
     else:
@@ -224,6 +222,51 @@ def attack_chain_system_note(
     if note:
         lines.append(f"Operator custom prompt: {note}")
     return "\n".join(lines)
+
+
+ATTACK_CHAIN_FOLLOWUP_SUMMARIZE_SUFFIX = (
+    " ATTACK CHAIN SESSION: After your summary, you MUST emit a tool_call for the next single "
+    "planned step in this same response. Never ask 'shall I proceed' or wait for confirmation — "
+    "the approval UI handles consent automatically."
+)
+
+
+def attack_chain_followup_context(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], frozenset[str] | None, str]:
+    """System messages, next-tool filter, and summarize suffix for post-tool LLM follow-up."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return [], None, ""
+
+    system_messages: list[dict[str, str]] = []
+    hint = attack_chain_execution_hint(sess, rows)
+    if hint:
+        system_messages.append({"role": "system", "content": hint})
+
+    steps = ac.get("steps")
+    if isinstance(steps, list) and steps:
+        plan_id = str(ac.get("plan_id") or "").strip()
+        intelligent = plan_id == INTELLIGENT_ATTACK_CHAIN_ID
+        system_messages.append(
+            {
+                "role": "system",
+                "content": attack_chain_system_note(
+                    steps,
+                    intelligent=intelligent,
+                    objective=str(ac.get("objective") or "") or None,
+                    operator_note=str(ac.get("operator_note") or "") or None,
+                    executive_summary=str(ac.get("executive_summary") or "") or None,
+                    attack_paths=ac.get("attack_paths") if isinstance(ac.get("attack_paths"), list) else None,
+                    phases=ac.get("phases") if isinstance(ac.get("phases"), list) else None,
+                    planner_source=str(ac.get("planner_source") or "") or None,
+                ),
+            }
+        )
+
+    batch_only = attack_chain_next_tool_only(sess, rows)
+    return system_messages, batch_only, ATTACK_CHAIN_FOLLOWUP_SUMMARIZE_SUFFIX
 
 
 def _parse_intelligent_preview(raw: dict[str, Any], target: str, objective: str) -> dict[str, Any]:
@@ -353,7 +396,8 @@ def attack_chain_execution_hint(
         f"Attack chain progress: {done}/{total} tools completed. "
         f"{phase_part}"
         f"Next planned step ({next_idx + 1}/{total}): `{next_tool}`. "
-        "Call only this tool now — do not batch or skip ahead."
+        "After summarizing the last result, emit a tool_call for this tool in the same response. "
+        "Do not ask the user to confirm — the UI handles approval."
     )
 
 

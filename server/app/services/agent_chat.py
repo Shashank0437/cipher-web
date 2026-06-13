@@ -37,7 +37,10 @@ from app.services.agent_client import (
 from app.services.session_intelligence import recalculate_session_intelligence
 from app.services.tool_run_stream import drain_tool_run_stream
 from app.services.agent_skills import fetch_skill_blocks_for_meta, inject_followup_skills
-from app.services.agent_attack_chains import attack_chain_execution_hint, attack_chain_next_tool_only
+from app.services.agent_attack_chains import (
+    attack_chain_followup_context,
+    attack_chain_next_tool_only,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1731,6 +1734,44 @@ async def _bridge_fetch_tool_schemas(
     return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta_out)
 
 
+async def _augment_follow_schemas_for_attack_chain(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    organization_id: ObjectId,
+    batch_only: frozenset[str] | None,
+    pruned_schemas: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Ensure the next attack-chain tool is callable even if it was not in the original turn schemas."""
+    if not batch_only:
+        return pruned_schemas
+    out = [s for s in (pruned_schemas or []) if isinstance(s, dict)]
+    existing = {
+        str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower()
+        for s in out
+    }
+    missing = [t for t in batch_only if t.strip().lower() not in existing]
+    if not missing:
+        return out or None
+    ctx = await _load_chat_tool_maps(settings, db, organization_id=organization_id)
+    if ctx is None:
+        return out or None
+    by_name, _ = ctx
+    objs = [by_name[n] for n in missing if n in by_name]
+    if not objs:
+        return out or None
+    rt = await _bridge_fetch_tool_schemas(
+        settings,
+        objs,
+        timeout_seconds=settings.agent_timeout_seconds,
+        meta={},
+        intent="operational",
+    )
+    extra = rt.schemas if rt.schemas else []
+    if extra:
+        out.extend(extra)
+    return out or None
+
+
 _TARGET_HINT_RE = re.compile(r"https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b")
 
 # Pronouns / references that point at a target the user mentioned earlier.
@@ -3251,11 +3292,26 @@ async def execute_tool_slots_follow_up(
             user_id=user_id,
             session_id=session_id,
         )
-        ac_hint = attack_chain_execution_hint(sess_ac, fresh_rows)
-        if ac_hint:
-            follow_llm.insert(0, {"role": "system", "content": ac_hint})
-        follow_batch_only = attack_chain_next_tool_only(sess_ac, fresh_rows)
+        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_ac, fresh_rows)
+        for ac_msg in reversed(ac_system):
+            follow_llm.insert(0, ac_msg)
+        if ac_suffix:
+            for msg in follow_llm:
+                content = msg.get("content")
+                if isinstance(content, str) and "The following tools just ran" in content:
+                    msg["content"] = content + ac_suffix
+                    break
     await inject_followup_skills(settings, follow_llm, routing)
+    if isinstance(sess_ac, dict):
+        follow_schemas = await _augment_follow_schemas_for_attack_chain(
+            settings,
+            db,
+            organization_id,
+            follow_batch_only,
+            pruned_batch_follow_schemas,
+        )
+    else:
+        follow_schemas = pruned_batch_follow_schemas
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -3264,7 +3320,7 @@ async def execute_tool_slots_follow_up(
         session_id=session_id,
         llm_messages=follow_llm,
         carry_thinking=carry_thinking,
-        tool_schemas=pruned_batch_follow_schemas,
+        tool_schemas=follow_schemas,
         tenant_roles=tenant_roles,
         auto_accept_tools=auto_accept_tools,
         batch_only_tool_names=follow_batch_only,
@@ -3427,6 +3483,32 @@ async def _auto_execute_single_tool_sse(
         + [summarize_system]
         + assistant_and_tool_result_pair(tool_name, args, result_text, call_id=str(auto_assistant_mid))
     )
+    sess_ac = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    follow_batch_only: frozenset[str] | None = None
+    if isinstance(sess_ac, dict):
+        fresh_rows = await list_messages(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_ac, fresh_rows)
+        for ac_msg in reversed(ac_system):
+            follow_msgs.insert(0, ac_msg)
+        if ac_suffix:
+            summarize_system["content"] = summarize_system["content"] + ac_suffix
+        pruned_follow_schemas = await _augment_follow_schemas_for_attack_chain(
+            settings,
+            db,
+            organization_id,
+            follow_batch_only,
+            pruned_follow_schemas,
+        )
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -3438,6 +3520,7 @@ async def _auto_execute_single_tool_sse(
         tool_schemas=pruned_follow_schemas,
         tenant_roles=roles_l,
         auto_accept_tools=auto_accept_tools,
+        batch_only_tool_names=follow_batch_only,
         batch_exclude_tool_names=frozenset({ran_tool_lower}),
     ):
         yield chunk

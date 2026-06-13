@@ -140,7 +140,7 @@ export function buildAttackChainPrompt(
   if (options?.intelligent) {
     lines.push(
       `[Intelligent attack chain: ${planTitle}]`,
-      `Target: ${target}. Precision: ${options.objective ?? "comprehensive"}.`,
+      `Target: ${target}.`,
       "Execute the AI-planned pipeline below in order.",
     );
   } else {
