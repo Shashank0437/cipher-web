@@ -27,7 +27,21 @@ import {
   streamAgentChatToolBatchExecute,
   streamAgentChatToolConfirm,
 } from "@/lib/agentChat";
+import {
+  buildAttackChainPrompt,
+  listAttackChainPlans,
+  previewAttackChainPlan,
+  type AttackChainPlan,
+} from "@/lib/agentAttackChains";
+import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModal";
 import { ApiError } from "@/lib/api";
+
+const ATTACK_CHAIN_ICONS: Record<string, string> = {
+  ai_recon: "radar",
+  ai_profiling: "person_search",
+  ai_vuln: "bug_report",
+  ai_osint: "public",
+};
 
 type QuickCard = {
   id: string;
@@ -417,12 +431,16 @@ const ROTATING_PROMPTS = [
   "Conduct a standard web penetration test against https://example.com and summarize findings with next steps.",
 ];
 
+type ComposerMode = "agent" | "tool" | "plan";
+
 type ClaudePromptBoxProps = {
   textareaId: string;
   prompt: string;
   onPromptChange: (value: string) => void;
   onExecute: () => void;
   isSending: boolean;
+  composerMode: ComposerMode;
+  onComposerModeChange: (mode: ComposerMode) => void;
   onOpenToolPicker: () => void;
   explicitToolNamesCount: number;
   toolExecutionMode: AgentChatToolExecutionMode;
@@ -438,6 +456,8 @@ function VrikaClaudePromptBox({
   onPromptChange,
   onExecute,
   isSending,
+  composerMode,
+  onComposerModeChange,
   onOpenToolPicker,
   explicitToolNamesCount,
   toolExecutionMode,
@@ -488,23 +508,30 @@ function VrikaClaudePromptBox({
         >
           <button
             type="button"
-            onClick={() => textareaRef.current?.focus()}
-            aria-label="Focus mission prompt"
-            className={`${pillBase} items-center border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/55`}
+            onClick={() => onComposerModeChange("agent")}
+            aria-label="Agent mode — free-form mission prompt"
+            className={`${pillBase} items-center ${
+              composerMode === "agent"
+                ? "border-primary/35 bg-primary-container/55 text-primary"
+                : "border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/40"
+            }`}
           >
             <MaterialSymbol name="smart_toy" className="text-[16px] text-primary" filled />
             <span>Agent</span>
           </button>
           <button
             type="button"
-            onClick={onOpenToolPicker}
+            onClick={() => {
+              onComposerModeChange("tool");
+              onOpenToolPicker();
+            }}
             aria-label={
               explicitToolNamesCount ? `${explicitToolNamesCount} tools pinned, choose tools` : "Choose tools"
             }
-            className={`${pillBase} items-center border-outline-variant/80 hover:border-primary/35 hover:bg-primary-container/40 ${
-              explicitToolNamesCount
+            className={`${pillBase} items-center ${
+              composerMode === "tool" || explicitToolNamesCount
                 ? "border-primary/30 bg-primary-container/45 text-primary"
-                : "bg-surface-container-high/90 text-on-surface"
+                : "border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/40"
             }`}
           >
             <MaterialSymbol name="build" className="text-[16px] opacity-[0.92]" aria-hidden filled />
@@ -514,6 +541,19 @@ function VrikaClaudePromptBox({
                 {explicitToolNamesCount}
               </span>
             ) : null}
+          </button>
+          <button
+            type="button"
+            onClick={() => onComposerModeChange("plan")}
+            aria-label="Plan attack chain — pre-built recon and vuln pipelines"
+            className={`${pillBase} items-center ${
+              composerMode === "plan"
+                ? "border-primary/35 bg-primary-container/55 text-primary"
+                : "border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/40"
+            }`}
+          >
+            <MaterialSymbol name="route" className="text-[16px] text-primary" filled />
+            <span className="whitespace-nowrap">Plan Attack Chain</span>
           </button>
         </div>
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
@@ -624,6 +664,12 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [batchDecisionsBusyId, setBatchDecisionsBusyId] = useState<string | null>(null);
   const [toolExecutionMode, setToolExecutionMode] = useState<AgentChatToolExecutionMode>("ask_permission");
   const [explicitToolNames, setExplicitToolNames] = useState<string[] | null>(null);
+  const [composerMode, setComposerMode] = useState<ComposerMode>("agent");
+  const [attackChainPlans, setAttackChainPlans] = useState<AttackChainPlan[]>([]);
+  const [attackChainModalPlan, setAttackChainModalPlan] = useState<AttackChainPlan | null>(null);
+  const [attackChainModalOpen, setAttackChainModalOpen] = useState(false);
+  const [attackChainStarting, setAttackChainStarting] = useState(false);
+  const [attackChainModalError, setAttackChainModalError] = useState<string | null>(null);
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
   const [orgToolsRows, setOrgToolsRows] = useState<{ name: string; description: string }[]>([]);
   const [orgToolsLoading, setOrgToolsLoading] = useState(false);
@@ -869,6 +915,20 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     }, 1500);
     return () => window.clearInterval(id);
   }, [selectedSessionId, currentMessages, refreshMessages]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listAttackChainPlans()
+      .then((plans) => {
+        if (!cancelled) setAttackChainPlans(plans);
+      })
+      .catch(() => {
+        if (!cancelled) setAttackChainPlans([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const flushTimers = streamPreviewFlushTimerRef.current;
@@ -1199,84 +1259,137 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     ],
   );
 
-  const handleExecute = useCallback(async () => {
-    const text = prompt.trim();
-    if (!text || isSending) return;
+  const executeMessage = useCallback(
+    async (text: string, toolNames: string[] | null) => {
+      const trimmed = text.trim();
+      if (!trimmed || isSending) return;
 
-    abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
 
-    let sessionId = selectedSessionId;
-    try {
-      setActionErr(null);
-      if (!sessionId) {
-        const s = await createAgentChatSession("");
-        sessionId = s.id;
-        setSessions((prev) => [s, ...prev]);
-        setSelectedSessionId(s.id);
-      }
+      let sessionId = selectedSessionId;
+      try {
+        setActionErr(null);
+        if (!sessionId) {
+          const s = await createAgentChatSession("");
+          sessionId = s.id;
+          setSessions((prev) => [s, ...prev]);
+          setSelectedSessionId(s.id);
+        }
 
-      setPrompt("");
-      updateSessionStreamState(sessionId, {
-        isSending: true,
-        waitingForFirstToken: true,
-      });
-      setPinnedToBottom(true);
-      clearLiveStreamState(sessionId);
-      reasoningStartedAtRef.current[sessionId] = performance.now();
-      setOptimisticMessages((prev) => ({
-        ...prev,
-        [sessionId!]: [
-          {
-            id: `optimistic-user-${Date.now()}`,
-            role: "user",
-            content: text,
-            created_at: new Date().toISOString(),
-          },
-        ],
-      }));
+        setPrompt("");
+        updateSessionStreamState(sessionId, {
+          isSending: true,
+          waitingForFirstToken: true,
+        });
+        setPinnedToBottom(true);
+        clearLiveStreamState(sessionId);
+        reasoningStartedAtRef.current[sessionId] = performance.now();
+        setOptimisticMessages((prev) => ({
+          ...prev,
+          [sessionId!]: [
+            {
+              id: `optimistic-user-${Date.now()}`,
+              role: "user",
+              content: trimmed,
+              created_at: new Date().toISOString(),
+            },
+          ],
+        }));
 
-      await streamAgentChatMessage(sessionId, text, {
-        signal: ac.signal,
-        toolExecutionMode,
-        explicitToolNames,
-        onEvent: attachStreamHandlers(sessionId),
-      });
-    } catch (e) {
-      if ((e as Error).name === "AbortError") {
+        await streamAgentChatMessage(sessionId, trimmed, {
+          signal: ac.signal,
+          toolExecutionMode,
+          explicitToolNames: toolNames,
+          onEvent: attachStreamHandlers(sessionId),
+        });
+      } catch (e) {
+        if ((e as Error).name === "AbortError") {
+          if (sessionId) {
+            updateSessionStreamState(sessionId, {
+              reasoningStreaming: false,
+              streamReasoning: "",
+              streamPreview: "",
+            });
+            setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
+          }
+          return;
+        }
+        setPrompt(trimmed);
+        if (sessionId) {
+          setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
+          setActionErr(formatChatError(e));
+          await refreshMessages(sessionId);
+        }
+      } finally {
         if (sessionId) {
           updateSessionStreamState(sessionId, {
+            isSending: false,
+            waitingForFirstToken: false,
             reasoningStreaming: false,
-            streamReasoning: "",
-            streamPreview: "",
           });
-          setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
+          stopStreamPreviewFlush(sessionId);
+          flushAllStreamPreview(sessionId);
+          await refreshMessages(sessionId);
+          await refreshSessions();
         }
-        return;
+        abortRef.current = null;
       }
-      setPrompt(text);
-      if (sessionId) {
-        setOptimisticMessages((prev) => ({ ...prev, [sessionId!]: [] }));
-        setActionErr(formatChatError(e));
-        await refreshMessages(sessionId);
+    },
+    [
+      attachStreamHandlers,
+      clearLiveStreamState,
+      flushAllStreamPreview,
+      isSending,
+      refreshMessages,
+      refreshSessions,
+      selectedSessionId,
+      stopStreamPreviewFlush,
+      toolExecutionMode,
+      updateSessionStreamState,
+    ],
+  );
+
+  const handleExecute = useCallback(async () => {
+    await executeMessage(prompt, explicitToolNames);
+  }, [executeMessage, prompt, explicitToolNames]);
+
+  const openAttackChainModal = useCallback((plan: AttackChainPlan) => {
+    setComposerMode("plan");
+    setAttackChainModalPlan(plan);
+    setAttackChainModalError(null);
+    setAttackChainModalOpen(true);
+  }, []);
+
+  const handleAttackChainStart = useCallback(
+    async (target: string, note: string) => {
+      if (!attackChainModalPlan) return;
+      setAttackChainStarting(true);
+      setAttackChainModalError(null);
+      try {
+        const preview = await previewAttackChainPlan(attackChainModalPlan.id, target);
+        if (!preview.success) {
+          throw new Error(preview.error ?? "Failed to build attack chain plan");
+        }
+        const msg = buildAttackChainPrompt(
+          preview.session_name || attackChainModalPlan.title,
+          preview.target || target,
+          preview.tools,
+          note,
+        );
+        setExplicitToolNames(preview.tools);
+        setComposerMode("plan");
+        setAttackChainModalOpen(false);
+        await executeMessage(msg, preview.tools);
+      } catch (err) {
+        setAttackChainModalError(formatChatError(err));
+      } finally {
+        setAttackChainStarting(false);
       }
-    } finally {
-      if (sessionId) {
-        updateSessionStreamState(sessionId, { isSending: false });
-      }
-    }
-  }, [
-    prompt,
-    isSending,
-    selectedSessionId,
-    attachStreamHandlers,
-    clearLiveStreamState,
-    refreshMessages,
-    toolExecutionMode,
-    explicitToolNames,
-    updateSessionStreamState,
-  ]);
+    },
+    [attackChainModalPlan, executeMessage],
+  );
 
   const handleToolConfirm = useCallback(
     async (assistantMessageId: string, approved: boolean) => {
@@ -1584,27 +1697,56 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                   </div>
 
                   <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-                    {QUICK_CARDS.map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => onCardClick(c.promptSeed)}
-                        className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:border-primary/35 hover:shadow-md"
-                      >
-                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
-                          <MaterialSymbol name={c.icon} className="text-2xl" filled />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-bold text-on-surface">{c.title}</p>
-                          <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{c.description}</p>
-                        </div>
-                      </button>
-                    ))}
+                    {composerMode === "plan"
+                      ? attackChainPlans.map((plan) => (
+                          <button
+                            key={plan.id}
+                            type="button"
+                            onClick={() => openAttackChainModal(plan)}
+                            className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:border-primary/35 hover:shadow-md"
+                          >
+                            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
+                              <MaterialSymbol
+                                name={ATTACK_CHAIN_ICONS[plan.id] ?? "route"}
+                                className="text-2xl"
+                                filled
+                              />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="font-bold text-on-surface">{plan.title}</p>
+                                <span className="shrink-0 rounded-md border border-outline-variant/70 bg-surface-container-high/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                                  {plan.badge}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{plan.description}</p>
+                              <p className="mt-1 text-[12px] leading-snug text-on-surface-variant/80">{plan.details}</p>
+                            </div>
+                          </button>
+                        ))
+                      : QUICK_CARDS.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => onCardClick(c.promptSeed)}
+                            className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:border-primary/35 hover:shadow-md"
+                          >
+                            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
+                              <MaterialSymbol name={c.icon} className="text-2xl" filled />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-bold text-on-surface">{c.title}</p>
+                              <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{c.description}</p>
+                            </div>
+                          </button>
+                        ))}
                   </div>
 
                   <p className="mt-6 max-w-xl text-center text-[13px] leading-snug text-on-surface-variant">
                     Use the <span className="font-semibold text-on-surface">Agent</span> /{" "}
-                    <span className="font-semibold text-on-surface">Tool</span> pills in the prompt bar, then Execute.
+                    <span className="font-semibold text-on-surface">Tool</span> /{" "}
+                    <span className="font-semibold text-on-surface">Plan Attack Chain</span> pills in the prompt bar,
+                    then Execute.
                   </p>
                 </div>
               ) : (
@@ -2180,6 +2322,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     onPromptChange={setPrompt}
                     onExecute={() => void handleExecute()}
                     isSending={isSending}
+                    composerMode={composerMode}
+                    onComposerModeChange={setComposerMode}
                     onOpenToolPicker={() => void handleOpenToolPicker()}
                     explicitToolNamesCount={explicitToolNames?.length ?? 0}
                     toolExecutionMode={toolExecutionMode}
@@ -2204,6 +2348,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               onPromptChange={setPrompt}
               onExecute={() => void handleExecute()}
               isSending={isSending}
+              composerMode={composerMode}
+              onComposerModeChange={setComposerMode}
               onOpenToolPicker={() => void handleOpenToolPicker()}
               explicitToolNamesCount={explicitToolNames?.length ?? 0}
               toolExecutionMode={toolExecutionMode}
@@ -2215,6 +2361,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           ) : null}
           </div>
           </div>
+
+          <AttackChainPlanModal
+            plan={attackChainModalPlan}
+            open={attackChainModalOpen}
+            onClose={() => {
+              setAttackChainModalOpen(false);
+              setAttackChainModalError(null);
+            }}
+            onStart={handleAttackChainStart}
+            starting={attackChainStarting}
+            error={attackChainModalError}
+          />
 
           {toolPickerOpen ? (
             <div

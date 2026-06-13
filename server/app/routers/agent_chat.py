@@ -29,6 +29,10 @@ from app.schemas.agent_chat import (
     AgentChatSessionPatch,
     AgentChatToolConfirmBody,
     AgentChatToolDecisionsPatch,
+    AttackChainPlanPreviewBody,
+    AttackChainPlanPreviewOut,
+    AttackChainPlanOut,
+    AttackChainPlansOut,
 )
 from app.services.agent_chat import (
     RouterTurnResult,
@@ -78,6 +82,7 @@ from app.services.agent_client import (
     agent_path_not_allowed,
     normalize_agent_tool_path,
 )
+from app.services.agent_attack_chains import list_attack_chain_plans, preview_attack_chain_plan
 from app.services.agent_skills import inject_followup_skills, inject_skills_into_llm_messages
 from app.services.session_intelligence import list_session_intelligence, recalculate_session_intelligence
 from app.services.organization_tools import get_disabled_tool_names
@@ -219,6 +224,25 @@ async def agent_chat_org_tools(
             detail="Agent catalog unreachable",
         )
     return AgentChatOrgToolsOut(tools=[AgentChatOrgToolRow(**r) for r in rows])
+
+
+@router.get("/attack-chain-plans", response_model=AttackChainPlansOut)
+async def list_attack_chain_plans_route(
+    user: dict = Depends(require_auth_user),
+) -> AttackChainPlansOut:
+    plans = [AttackChainPlanOut(**p) for p in list_attack_chain_plans()]
+    return AttackChainPlansOut(plans=plans)
+
+
+@router.post("/attack-chain-plans/{plan_id}/preview", response_model=AttackChainPlanPreviewOut)
+async def preview_attack_chain_plan_route(
+    plan_id: str,
+    body: AttackChainPlanPreviewBody,
+    user: dict = Depends(require_auth_user),
+) -> AttackChainPlanPreviewOut:
+    settings = get_settings()
+    result = await preview_attack_chain_plan(settings, plan_id.strip(), body.target.strip())
+    return AttackChainPlanPreviewOut(**result)
 
 
 @router.post("/sessions", response_model=AgentChatSessionOut)

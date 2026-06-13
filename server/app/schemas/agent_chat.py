@@ -103,3 +103,33 @@ class AgentChatSendBody(BaseModel):
 class AgentChatToolConfirmBody(BaseModel):
     approved: bool
     assistant_message_id: str
+
+
+class AttackChainPlanOut(BaseModel):
+    id: str
+    title: str
+    badge: str
+    description: str
+    details: str
+    modal_description: str
+    tools: list[str]
+    placeholder: str
+
+
+class AttackChainPlansOut(BaseModel):
+    plans: list[AttackChainPlanOut]
+
+
+class AttackChainPlanPreviewBody(BaseModel):
+    target: str = Field(..., min_length=1, max_length=500)
+
+
+class AttackChainPlanPreviewOut(BaseModel):
+    success: bool
+    plan_id: str = ""
+    session_name: str = ""
+    target: str = ""
+    target_type: str | None = None
+    tools: list[str] = Field(default_factory=list)
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
