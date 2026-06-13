@@ -98,6 +98,11 @@ class AgentChatSendBody(BaseModel):
         max_length=24,
         description="If non-empty, skip route-intent and bind LLM tool schemas to this subset (must be org-enabled).",
     )
+    attack_chain_steps: list[dict[str, Any]] = Field(
+        default_factory=list,
+        max_length=32,
+        description="Ordered workflow_steps from attack-chain preview; enables sequential tool execution.",
+    )
 
 
 class AgentChatToolConfirmBody(BaseModel):

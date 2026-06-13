@@ -2728,6 +2728,25 @@ async def _run_one_tool(
     return text
 
 
+async def _session_attack_chain_sequential(
+    db: AsyncIOMotorDatabase,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+) -> bool:
+    """True when this chat session was started from Plan Attack Chain (ordered workflow_steps)."""
+    sess = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if not sess:
+        return False
+    ac = sess.get("attack_chain")
+    return isinstance(ac, dict) and bool(ac.get("sequential"))
+
+
 async def execute_tool_slots_follow_up(
     settings: Settings,
     db: AsyncIOMotorDatabase,
@@ -2844,6 +2863,10 @@ async def execute_tool_slots_follow_up(
         if str(s.get("human_decision") or "").lower() == "approve"
         and str(s.get("tool_name") or "").strip() not in disabled
     ]
+    approve_to_run.sort(key=lambda s: int(s.get("slot_index", 0)))
+    sequential_tool_execution = await _session_attack_chain_sequential(
+        db, organization_id, user_id, session_id
+    )
 
     batch_filter = (
         {
@@ -2927,8 +2950,10 @@ async def execute_tool_slots_follow_up(
         finally:
             await prog_q.put(("finished", idx, tn, result_text, prog))
 
-    exec_tasks = [asyncio.create_task(exec_approved(s)) for s in approve_to_run]
-    pending_finish = len(exec_tasks)
+    if sequential_tool_execution and len(approve_to_run) > 1:
+        exec_batches: list[list[dict[str, Any]]] = [[s] for s in approve_to_run]
+    else:
+        exec_batches = [approve_to_run] if approve_to_run else []
 
     async def persist_working_if_batch() -> None:
         if batch_message_id is not None and batch_filter is not None:
@@ -2939,102 +2964,106 @@ async def execute_tool_slots_follow_up(
 
     results_by_idx: dict[int, str] = {}
 
-    while pending_finish > 0:
-        kind, *rest = await prog_q.get()
-        if kind == "running":
-            idx, tn, started = int(rest[0]), str(rest[1]), str(rest[2])
-            patch_run = {
-                "run_status": "running",
-                "run_started_at": started,
-                "stdout_tail": None,
-                "stderr_tail": None,
-                "stdout_truncated": False,
-                "stderr_truncated": False,
-                "exit_code": None,
-                "http_status": None,
-                "execution_log_tail": None,
-                "execution_log_truncated": False,
-                "progress_line": None,
-            }
-            _merge_slot_patch(working_slots, idx, patch_run)
-            await persist_working_if_batch()
-            if batch_message_id is not None:
-                yield _sse_tool_batch_slot_progress(
-                    batch_message_id,
-                    _slot_progress_payload(
-                        slot_index=idx,
-                        tool_name=tn,
-                        run_status="running",
-                        stdout_tail=None,
-                        stderr_tail=None,
-                        stdout_truncated=False,
-                        stderr_truncated=False,
-                        exit_code=None,
-                        http_status=None,
-                        started_at=started,
-                        finished_at=None,
-                        execution_log_tail=None,
-                        execution_log_truncated=False,
-                        progress_line=None,
-                    ),
+    for exec_chunk in exec_batches:
+        exec_tasks = [asyncio.create_task(exec_approved(s)) for s in exec_chunk]
+        pending_finish = len(exec_tasks)
+
+        while pending_finish > 0:
+            kind, *rest = await prog_q.get()
+            if kind == "running":
+                idx, tn, started = int(rest[0]), str(rest[1]), str(rest[2])
+                patch_run = {
+                    "run_status": "running",
+                    "run_started_at": started,
+                    "stdout_tail": None,
+                    "stderr_tail": None,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "exit_code": None,
+                    "http_status": None,
+                    "execution_log_tail": None,
+                    "execution_log_truncated": False,
+                    "progress_line": None,
+                }
+                _merge_slot_patch(working_slots, idx, patch_run)
+                await persist_working_if_batch()
+                if batch_message_id is not None:
+                    yield _sse_tool_batch_slot_progress(
+                        batch_message_id,
+                        _slot_progress_payload(
+                            slot_index=idx,
+                            tool_name=tn,
+                            run_status="running",
+                            stdout_tail=None,
+                            stderr_tail=None,
+                            stdout_truncated=False,
+                            stderr_truncated=False,
+                            exit_code=None,
+                            http_status=None,
+                            started_at=started,
+                            finished_at=None,
+                            execution_log_tail=None,
+                            execution_log_truncated=False,
+                            progress_line=None,
+                        ),
+                    )
+                    await _sse_flush_tick()
+            elif kind == "stream_progress":
+                idx_sp = int(rest[0])
+                body = dict(rest[2])
+                patch_sp = {
+                    "run_status": str(body.get("run_status") or "running"),
+                    "stdout_tail": body.get("stdout_tail"),
+                    "stderr_tail": body.get("stderr_tail"),
+                    "stdout_truncated": bool(body.get("stdout_truncated")),
+                    "stderr_truncated": bool(body.get("stderr_truncated")),
+                    "exit_code": body.get("exit_code"),
+                    "http_status": body.get("http_status"),
+                    "execution_log_tail": body.get("execution_log_tail"),
+                    "execution_log_truncated": bool(body.get("execution_log_truncated")),
+                    "progress_line": body.get("progress_line"),
+                }
+                _merge_slot_patch(working_slots, idx_sp, patch_sp)
+                await persist_working_if_batch()
+                if batch_message_id is not None:
+                    yield _sse_tool_batch_slot_progress(batch_message_id, body)
+                    await _sse_flush_tick()
+            elif kind == "finished":
+                idx = int(rest[0])
+                tn = str(rest[1])
+                result_text = str(rest[2])
+                prog = dict(rest[3])
+                results_by_idx[idx] = result_text
+                _merge_slot_patch(working_slots, idx, prog)
+                await persist_working_if_batch()
+                row = next(
+                    (s for i, s in enumerate(working_slots) if int(s.get("slot_index", i)) == idx),
+                    {},
                 )
-                await _sse_flush_tick()
-        elif kind == "stream_progress":
-            idx_sp = int(rest[0])
-            body = dict(rest[2])
-            patch_sp = {
-                "run_status": str(body.get("run_status") or "running"),
-                "stdout_tail": body.get("stdout_tail"),
-                "stderr_tail": body.get("stderr_tail"),
-                "stdout_truncated": bool(body.get("stdout_truncated")),
-                "stderr_truncated": bool(body.get("stderr_truncated")),
-                "exit_code": body.get("exit_code"),
-                "http_status": body.get("http_status"),
-                "execution_log_tail": body.get("execution_log_tail"),
-                "execution_log_truncated": bool(body.get("execution_log_truncated")),
-                "progress_line": body.get("progress_line"),
-            }
-            _merge_slot_patch(working_slots, idx_sp, patch_sp)
-            await persist_working_if_batch()
-            if batch_message_id is not None:
-                yield _sse_tool_batch_slot_progress(batch_message_id, body)
-                await _sse_flush_tick()
-        elif kind == "finished":
-            idx = int(rest[0])
-            tn = str(rest[1])
-            result_text = str(rest[2])
-            prog = dict(rest[3])
-            results_by_idx[idx] = result_text
-            _merge_slot_patch(working_slots, idx, prog)
-            await persist_working_if_batch()
-            row = next(
-                (s for i, s in enumerate(working_slots) if int(s.get("slot_index", i)) == idx),
-                {},
-            )
-            if batch_message_id is not None:
-                yield _sse_tool_batch_slot_progress(
-                    batch_message_id,
-                    _slot_progress_payload(
-                        slot_index=idx,
-                        tool_name=tn,
-                        run_status=str(prog.get("run_status") or "done"),
-                        stdout_tail=prog.get("stdout_tail"),
-                        stderr_tail=prog.get("stderr_tail"),
-                        stdout_truncated=bool(prog.get("stdout_truncated")),
-                        stderr_truncated=bool(prog.get("stderr_truncated")),
-                        exit_code=prog.get("exit_code"),
-                        http_status=prog.get("http_status"),
-                        started_at=row.get("run_started_at") if isinstance(row.get("run_started_at"), str) else None,
-                        finished_at=prog.get("run_finished_at")
-                        if isinstance(prog.get("run_finished_at"), str)
-                        else None,
-                        execution_log_tail=prog.get("execution_log_tail"),
-                        execution_log_truncated=bool(prog.get("execution_log_truncated")),
-                        progress_line=prog.get("progress_line"),
-                    ),
-                )
-                await _sse_flush_tick()
-            pending_finish -= 1
+                if batch_message_id is not None:
+                    yield _sse_tool_batch_slot_progress(
+                        batch_message_id,
+                        _slot_progress_payload(
+                            slot_index=idx,
+                            tool_name=tn,
+                            run_status=str(prog.get("run_status") or "done"),
+                            stdout_tail=prog.get("stdout_tail"),
+                            stderr_tail=prog.get("stderr_tail"),
+                            stdout_truncated=bool(prog.get("stdout_truncated")),
+                            stderr_truncated=bool(prog.get("stderr_truncated")),
+                            exit_code=prog.get("exit_code"),
+                            http_status=prog.get("http_status"),
+                            started_at=row.get("run_started_at") if isinstance(row.get("run_started_at"), str) else None,
+                            finished_at=prog.get("run_finished_at")
+                            if isinstance(prog.get("run_finished_at"), str)
+                            else None,
+                            execution_log_tail=prog.get("execution_log_tail"),
+                            execution_log_truncated=bool(prog.get("execution_log_truncated")),
+                            progress_line=prog.get("progress_line"),
+                        ),
+                    )
+                    await _sse_flush_tick()
+                pending_finish -= 1
 
     def _working_row_for_slot_index(si: int) -> dict[str, Any]:
         return next(

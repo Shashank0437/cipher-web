@@ -447,6 +447,8 @@ type ClaudePromptBoxProps = {
   onToolExecutionModeChange: (v: AgentChatToolExecutionMode) => void;
   /** When false, “Auto accept” is disabled (must match tenant admin on the server). */
   allowAutoAcceptTools?: boolean;
+  /** Plan Attack Chain pill — only on empty workspace, not inside an active chat. */
+  showPlanAttackChain?: boolean;
   placeholder?: string;
 };
 
@@ -463,6 +465,7 @@ function VrikaClaudePromptBox({
   toolExecutionMode,
   onToolExecutionModeChange,
   allowAutoAcceptTools = true,
+  showPlanAttackChain = false,
   placeholder,
 }: ClaudePromptBoxProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -542,19 +545,21 @@ function VrikaClaudePromptBox({
               </span>
             ) : null}
           </button>
-          <button
-            type="button"
-            onClick={() => onComposerModeChange("plan")}
-            aria-label="Plan attack chain — pre-built recon and vuln pipelines"
-            className={`${pillBase} items-center ${
-              composerMode === "plan"
-                ? "border-primary/35 bg-primary-container/55 text-primary"
-                : "border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/40"
-            }`}
-          >
-            <MaterialSymbol name="route" className="text-[16px] text-primary" filled />
-            <span className="whitespace-nowrap">Plan Attack Chain</span>
-          </button>
+          {showPlanAttackChain ? (
+            <button
+              type="button"
+              onClick={() => onComposerModeChange("plan")}
+              aria-label="Plan attack chain — pre-built recon and vuln pipelines"
+              className={`${pillBase} items-center ${
+                composerMode === "plan"
+                  ? "border-primary/35 bg-primary-container/55 text-primary"
+                  : "border-outline-variant/80 bg-surface-container-high/90 text-on-surface hover:border-primary/35 hover:bg-primary-container/40"
+              }`}
+            >
+              <MaterialSymbol name="route" className="text-[16px] text-primary" filled />
+              <span className="whitespace-nowrap">Plan Attack Chain</span>
+            </button>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <AgentChatExecModeDropdown
@@ -1260,7 +1265,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   );
 
   const executeMessage = useCallback(
-    async (text: string, toolNames: string[] | null) => {
+    async (
+      text: string,
+      toolNames: string[] | null,
+      attackChainSteps?: Array<Record<string, unknown>> | null,
+    ) => {
       const trimmed = text.trim();
       if (!trimmed || isSending) return;
 
@@ -1302,6 +1311,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           signal: ac.signal,
           toolExecutionMode,
           explicitToolNames: toolNames,
+          attackChainSteps: attackChainSteps ?? undefined,
           onEvent: attachStreamHandlers(sessionId),
         });
       } catch (e) {
@@ -1381,7 +1391,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         setExplicitToolNames(preview.tools);
         setComposerMode("plan");
         setAttackChainModalOpen(false);
-        await executeMessage(msg, preview.tools);
+        await executeMessage(msg, preview.tools, preview.steps);
       } catch (err) {
         setAttackChainModalError(formatChatError(err));
       } finally {
@@ -1535,6 +1545,12 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     }, 5000);
     return () => clearInterval(interval);
   }, [hasThread]);
+
+  useEffect(() => {
+    if (hasThread && composerMode === "plan") {
+      setComposerMode("agent");
+    }
+  }, [hasThread, composerMode]);
 
   return (
     <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-background font-sans text-on-surface md:flex-row">
@@ -2329,6 +2345,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     toolExecutionMode={toolExecutionMode}
                     onToolExecutionModeChange={setToolExecutionMode}
                     allowAutoAcceptTools={isTenantAdmin}
+                    showPlanAttackChain={false}
                   />
                 </div>
               </div>
@@ -2355,6 +2372,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               toolExecutionMode={toolExecutionMode}
               onToolExecutionModeChange={setToolExecutionMode}
               allowAutoAcceptTools={isTenantAdmin}
+              showPlanAttackChain={true}
               placeholder={ROTATING_PROMPTS[rotatingPromptIndex]}
             />
           </div>

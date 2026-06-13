@@ -561,6 +561,7 @@ export async function streamAgentChatMessage(
     context?: AgentChatContextPayload;
     toolExecutionMode?: AgentChatToolExecutionMode;
     explicitToolNames?: string[] | null;
+    attackChainSteps?: Array<Record<string, unknown>> | null;
     onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
@@ -570,6 +571,7 @@ export async function streamAgentChatMessage(
     context?: AgentChatContextPayload;
     tool_execution_mode?: AgentChatToolExecutionMode;
     explicit_tool_names?: string[];
+    attack_chain_steps?: Array<Record<string, unknown>>;
   } = {
     message: message.trim(),
   };
@@ -581,6 +583,9 @@ export async function streamAgentChatMessage(
   }
   if (options?.explicitToolNames?.length) {
     body.explicit_tool_names = options.explicitToolNames.slice(0, 24);
+  }
+  if (options?.attackChainSteps?.length) {
+    body.attack_chain_steps = options.attackChainSteps.slice(0, 32);
   }
   await postSse(
     `${PREFIX}/sessions/${sessionId}/messages`,
@@ -624,7 +629,7 @@ export async function patchAgentChatToolBatchDecisions(
   return JSON.parse(text) as { quorum_met: boolean; decided: number; total: number };
 }
 
-/** After quorum, run approved tools in parallel and stream follow-up assistant reply. */
+/** After quorum, run approved tools (sequential when session is an attack chain). */
 export async function streamAgentChatToolBatchExecute(
   sessionId: string,
   assistantMessageId: string,

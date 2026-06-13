@@ -82,7 +82,11 @@ from app.services.agent_client import (
     agent_path_not_allowed,
     normalize_agent_tool_path,
 )
-from app.services.agent_attack_chains import list_attack_chain_plans, preview_attack_chain_plan
+from app.services.agent_attack_chains import (
+    attack_chain_system_note,
+    list_attack_chain_plans,
+    preview_attack_chain_plan,
+)
 from app.services.agent_skills import inject_followup_skills, inject_skills_into_llm_messages
 from app.services.session_intelligence import list_session_intelligence, recalculate_session_intelligence
 from app.services.organization_tools import get_disabled_tool_names
@@ -539,6 +543,23 @@ async def post_message_stream(
             {"$set": {"title": auto}},
         )
 
+    attack_chain_steps: list[dict[str, Any]] = [
+        s for s in body.attack_chain_steps if isinstance(s, dict)
+    ]
+    if attack_chain_steps:
+        await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+            {"_id": sid},
+            {
+                "$set": {
+                    "attack_chain": {
+                        "sequential": True,
+                        "steps": attack_chain_steps[:32],
+                    },
+                    "updated_at": _utc_now_iso(),
+                }
+            },
+        )
+
     explicit_seen: set[str] = set()
     explicit_tools: list[str] = []
     for item in body.explicit_tool_names:
@@ -592,6 +613,8 @@ async def post_message_stream(
                 extra_system_parts.append(ctx_snip)
             if retry_rejected:
                 extra_system_parts.append(retry_rejected_tools_system_note(retry_rejected))
+            if attack_chain_steps:
+                extra_system_parts.append(attack_chain_system_note(attack_chain_steps))
             llm_messages = build_llm_messages_from_history(
                 settings,
                 rows,

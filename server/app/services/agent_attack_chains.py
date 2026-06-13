@@ -104,6 +104,27 @@ def _tool_names_from_steps(steps: list[Any]) -> list[str]:
     return out
 
 
+def attack_chain_system_note(steps: list[dict[str, Any]]) -> str:
+    """LLM instruction mirroring NyxStrike session workflow_steps order."""
+    lines = [
+        "Attack chain pipeline — run tools strictly in this order (one tool call per assistant turn):",
+    ]
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tool = str(step.get("tool") or step.get("name") or "").strip()
+        if not tool:
+            continue
+        deps = step.get("dependencies")
+        dep_list = [str(d) for d in deps] if isinstance(deps, list) else []
+        dep_suffix = f" (after {', '.join(dep_list)})" if dep_list else ""
+        lines.append(f"{i + 1}. {tool}{dep_suffix}")
+    lines.append(
+        "Do not batch multiple tools in one response. Call exactly one tool, wait for its result, then continue."
+    )
+    return "\n".join(lines)
+
+
 async def preview_attack_chain_plan(
     settings: Settings,
     plan_id: str,

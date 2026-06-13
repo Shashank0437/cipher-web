@@ -74,7 +74,7 @@ export function buildAttackChainPrompt(
     `[Attack chain: ${planTitle}]`,
     `Execute the full pipeline on ${target}.`,
     `Run these tools in order (respect dependencies): ${toolList}.`,
-    "Call each tool with parameters appropriate for the target; summarize findings after each major step.",
+    "Call exactly one tool per turn; wait for each result before the next step.",
   ];
   if (note?.trim()) {
     lines.push(`Operator note: ${note.trim()}`);
