@@ -40,15 +40,8 @@ import {
 import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModal";
 import { AttackChainFollowupCard } from "@/components/dashboard/AttackChainFollowupCard";
 import { AttackChainPhaseStrip, isAttackChainComplete } from "@/components/dashboard/AttackChainPhaseStrip";
+import { AttackChainWorkspaceSection } from "@/components/dashboard/AttackChainWorkspaceSection";
 import { ApiError } from "@/lib/api";
-
-const ATTACK_CHAIN_ICONS: Record<string, string> = {
-  intelligent_attack_chain: "auto_awesome",
-  ai_recon: "radar",
-  ai_profiling: "person_search",
-  ai_vuln: "bug_report",
-  ai_osint: "public",
-};
 
 function attackChainUiFromSessionDoc(
   ac: Record<string, unknown> | null | undefined,
@@ -572,7 +565,7 @@ function VrikaClaudePromptBox({
             <button
               type="button"
               onClick={() => onComposerModeChange("plan")}
-              aria-label="Plan attack chain — pre-built recon and vuln pipelines"
+              aria-label="Attack chain pipelines — scroll to predefined and intelligent chains"
               className={`${pillBase} items-center ${
                 composerMode === "plan"
                   ? "border-primary/35 bg-primary-container/55 text-primary"
@@ -1446,6 +1439,15 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     setAttackChainModalOpen(true);
   }, []);
 
+  const handleComposerModeChange = useCallback((mode: ComposerMode) => {
+    setComposerMode(mode);
+    if (mode === "plan") {
+      requestAnimationFrame(() => {
+        document.getElementById("attack-chain-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }, []);
+
   const handleAttackChainStart = useCallback(
     async (target: string, note: string, preview: AttackChainPlanPreview) => {
       if (!attackChainModalPlan) return;
@@ -1892,45 +1894,36 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       Initialize Offensive Sequence
                     </h2>
                     <p className="mt-2 max-w-lg text-[15px] leading-relaxed text-on-surface-variant">
-                      Deploy specialized agents to perform deep reconnaissance, vulnerability analysis, or automated
-                      exploit crafting.
+                      Launch an AI-planned attack chain or pick a fixed pipeline — then type freely in the composer
+                      below for custom missions.
                     </p>
                   </div>
 
-                  <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-                    {composerMode === "plan"
-                      ? attackChainPlans.map((plan) => (
-                          <button
-                            key={plan.id}
-                            type="button"
-                            onClick={() => openAttackChainModal(plan)}
-                            className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:border-primary/35 hover:shadow-md"
-                          >
-                            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
-                              <MaterialSymbol
-                                name={ATTACK_CHAIN_ICONS[plan.id] ?? "route"}
-                                className="text-2xl"
-                                filled
-                              />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-start justify-between gap-2">
-                                <p className="font-bold text-on-surface">{plan.title}</p>
-                                <span className="shrink-0 rounded-md border border-outline-variant/70 bg-surface-container-high/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
-                                  {plan.badge}
-                                </span>
-                              </div>
-                              <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{plan.description}</p>
-                              <p className="mt-1 text-[12px] leading-snug text-on-surface-variant/80">{plan.details}</p>
-                            </div>
-                          </button>
-                        ))
-                      : QUICK_CARDS.map((c) => (
+                  <div className="mt-8 w-full">
+                    <AttackChainWorkspaceSection
+                      plans={attackChainPlans}
+                      onSelectPlan={(plan) => openAttackChainModal(plan)}
+                    />
+                  </div>
+
+                  {composerMode !== "plan" ? (
+                    <div className="mt-10 w-full border-t border-outline-variant/60 pt-8">
+                      <div className="text-center sm:text-left">
+                        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-on-surface-variant/90">
+                          Quick mission templates
+                        </p>
+                        <h3 className="mt-1 text-lg font-bold text-on-surface">Or seed the composer</h3>
+                        <p className="mt-1 text-[13px] text-on-surface-variant">
+                          Click a template to fill the prompt — then send or refine before executing.
+                        </p>
+                      </div>
+                      <div className="mt-4 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+                        {QUICK_CARDS.map((c) => (
                           <button
                             key={c.id}
                             type="button"
                             onClick={() => onCardClick(c.promptSeed)}
-                            className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:border-primary/35 hover:shadow-md"
+                            className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/40"
                           >
                             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
                               <MaterialSymbol name={c.icon} className="text-2xl" filled />
@@ -1938,10 +1931,19 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                             <div className="min-w-0">
                               <p className="font-bold text-on-surface">{c.title}</p>
                               <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{c.description}</p>
+                              <span className="mt-2 inline-flex items-center gap-1 text-[12px] font-bold text-primary">
+                                Use template
+                                <MaterialSymbol
+                                  name="chevron_right"
+                                  className="text-[16px] transition group-hover:translate-x-0.5"
+                                />
+                              </span>
                             </div>
                           </button>
                         ))}
-                  </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="mx-auto flex min-w-0 w-[min(100%,70%)] flex-col gap-4 pb-2">
@@ -2538,7 +2540,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     onExecute={() => void handleExecute()}
                     isSending={isSending}
                     composerMode={composerMode}
-                    onComposerModeChange={setComposerMode}
+                    onComposerModeChange={handleComposerModeChange}
                     onOpenToolPicker={() => void handleOpenToolPicker()}
                     explicitToolNamesCount={explicitToolNames?.length ?? 0}
                     toolExecutionMode={toolExecutionMode}
@@ -2565,7 +2567,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               onExecute={() => void handleExecute()}
               isSending={isSending}
               composerMode={composerMode}
-              onComposerModeChange={setComposerMode}
+              onComposerModeChange={handleComposerModeChange}
               onOpenToolPicker={() => void handleOpenToolPicker()}
               explicitToolNamesCount={explicitToolNames?.length ?? 0}
               toolExecutionMode={toolExecutionMode}
