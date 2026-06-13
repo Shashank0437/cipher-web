@@ -99,6 +99,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_CHAT_REPORT_TRANSCRIPT_MAX_CHARS"),
     )
 
+    # Inject workflow skills (skills/*/SKILL.md) into agent-chat system context when routing picks a category.
+    agent_chat_skills_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("AGENT_CHAT_SKILLS_ENABLED"),
+    )
+    agent_chat_skill_max_chars: int = Field(
+        default=30_000,
+        ge=2_000,
+        le=80_000,
+        validation_alias=AliasChoices("AGENT_CHAT_SKILL_MAX_CHARS"),
+    )
+    # Optional local skills directory (bypass agent GET /api/skills when your agent does not expose skills).
+    agent_chat_skills_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices("AGENT_CHAT_SKILLS_DIR"),
+    )
+
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (
         "You are Vrika, an expert penetration testing AI assistant. "

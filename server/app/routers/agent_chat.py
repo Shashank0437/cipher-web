@@ -78,6 +78,7 @@ from app.services.agent_client import (
     agent_path_not_allowed,
     normalize_agent_tool_path,
 )
+from app.services.agent_skills import inject_followup_skills, inject_skills_into_llm_messages
 from app.services.session_intelligence import list_session_intelligence, recalculate_session_intelligence
 from app.services.organization_tools import get_disabled_tool_names
 
@@ -648,6 +649,14 @@ async def post_message_stream(
                 yield "data: [DONE]\n\n"
                 return
 
+            await inject_skills_into_llm_messages(
+                settings,
+                llm_messages,
+                router_meta=rt.meta,
+                intent=rt.intent,
+                prefetched_blocks=(rt.meta or {}).get("skill_injection_blocks"),
+            )
+
             tool_schemas = rt.schemas if (rt.intent == "operational" or rt.schemas) else None
             tenant_roles = list(user.get("roles") or [])
             auto_accept = body.tool_execution_mode == "auto_accept"
@@ -837,6 +846,11 @@ async def tool_confirm_stream(
                     list(snapshot)
                     + [reject_system]
                     + assistant_and_tool_result_pair(tool_name, args, cancel, call_id=str(aid))
+                )
+                await inject_followup_skills(
+                    settings,
+                    follow_msgs,
+                    msg.get("routing") if isinstance(msg.get("routing"), dict) else None,
                 )
                 async for chunk in stream_follow_up_after_tool(
                     settings,
@@ -1090,6 +1104,11 @@ async def tool_confirm_stream(
                 list(snapshot)
                 + [summarize_system]
                 + assistant_and_tool_result_pair(tool_name, args, result_text, call_id=str(aid))
+            )
+            await inject_followup_skills(
+                settings,
+                follow_msgs,
+                msg.get("routing") if isinstance(msg.get("routing"), dict) else None,
             )
             async for chunk in stream_follow_up_after_tool(
                 settings,

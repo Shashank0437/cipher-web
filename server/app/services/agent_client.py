@@ -200,6 +200,36 @@ async def agent_post_json(
     return data if isinstance(data, dict) else {"success": False, "error": "invalid agent JSON"}
 
 
+async def agent_get_json(
+    settings: Settings,
+    path: str,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """GET JSON from agent path."""
+    base = _normalized_base(settings)
+    if not base:
+        raise AgentUnreachableError("Agent URL is empty (set AGENT_MICROSERVICE_URL or AGENT_BASE_URL)")
+    timeout = httpx.Timeout(timeout_seconds)
+    headers = _headers(settings)
+    url = urljoin(base, path.lstrip("/"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+            r = await client.get(url)
+    except httpx.TimeoutException:
+        raise AgentUnreachableError(f"Timed out calling agent after {timeout_seconds}s") from None
+    except httpx.RequestError as e:
+        raise AgentUnreachableError(f"Cannot reach agent: {e}") from e
+
+    try:
+        data = r.json()
+    except ValueError:
+        data = {"success": False, "error": r.text or f"HTTP {r.status_code}", "raw_status": r.status_code}
+    if r.status_code >= 400 and isinstance(data, dict) and "error" not in data:
+        data = {"success": False, "error": data.get("detail") or str(data), "status_code": r.status_code}
+    return data if isinstance(data, dict) else {"success": False, "error": "invalid agent JSON"}
+
+
 async def agent_post_sse_stream(
     settings: Settings,
     path: str,

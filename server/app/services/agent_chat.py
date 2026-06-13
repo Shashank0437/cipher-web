@@ -36,6 +36,7 @@ from app.services.agent_client import (
 )
 from app.services.session_intelligence import recalculate_session_intelligence
 from app.services.tool_run_stream import drain_tool_run_stream
+from app.services.agent_skills import fetch_skill_blocks_for_meta, inject_followup_skills
 
 logger = logging.getLogger(__name__)
 
@@ -445,8 +446,8 @@ def routing_hints_from_plan_meta(meta: dict[str, Any]) -> dict[str, Any] | None:
     return h if h else None
 
 
-async def _fetch_keyword_category_hint(settings: Settings, user_message: str) -> dict[str, Any]:
-    """Keyword classify-task (+ cheap LLM tie-break on agent). Informational for UI / meta."""
+async def _fetch_classify_task_meta(settings: Settings, user_message: str) -> dict[str, Any]:
+    """classify-task: category, confidence, and compact tool list for fallback routing."""
     try:
         raw = await agent_post_json(
             settings,
@@ -468,7 +469,15 @@ async def _fetch_keyword_category_hint(settings: Settings, user_message: str) ->
             out["keyword_confidence"] = float(conf)
     except (TypeError, ValueError):
         pass
+    tools = raw.get("tools")
+    if isinstance(tools, list) and tools:
+        out["classify_tools"] = tools
     return out
+
+
+async def _fetch_keyword_category_hint(settings: Settings, user_message: str) -> dict[str, Any]:
+    """Alias for classify-task meta fragment (category + tools for fallback)."""
+    return await _fetch_classify_task_meta(settings, user_message)
 
 
 _CONVERSATIONAL_PATTERNS = (
@@ -1630,17 +1639,51 @@ async def list_agent_chat_org_tools_catalog(
     return rows
 
 
-def _annotate_fallback_tool_objs(
+def _tool_objs_from_classify_meta(
+    by_name: dict[str, dict[str, Any]],
+    meta: dict[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Intersect classify-task tool names with org-enabled installed catalog."""
+    raw_tools = meta.get("classify_tools")
+    if not isinstance(raw_tools, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_tools:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        if name not in by_name:
+            continue
+        seen.add(name)
+        out.append(by_name[name])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fallback_tool_objs(
     by_name: dict[str, dict[str, Any]],
     max_pick: int,
     meta: dict[str, Any],
     reason: str,
 ) -> list[dict[str, Any]]:
+    """Prefer classify-task category tools; else fixed security tool order."""
+    classify_objs = _tool_objs_from_classify_meta(by_name, meta, max_pick)
+    if classify_objs:
+        meta["fallback_tool_names"] = [str(o.get("name") or "") for o in classify_objs]
+        meta["fallback_reason"] = reason
+        meta["fallback_source"] = "classify_task"
+        return classify_objs
     fb = _fallback_security_tool_names(by_name, max_pick)
     if not fb:
         return []
     meta["fallback_tool_names"] = fb
     meta["fallback_reason"] = reason
+    meta["fallback_source"] = "fixed_order"
     return [by_name[n] for n in fb]
 
 
@@ -1651,25 +1694,40 @@ async def _bridge_fetch_tool_schemas(
     timeout_seconds: float,
     meta: dict[str, Any],
     router_reply: str | None = None,
+    intent: str = "operational",
 ) -> RouterTurnResult:
-    try:
-        schema_resp = await agent_post_json(
-            settings,
-            "api/cipherstrike/schemas-from-tools",
-            {"tools": tools_objs},
-            timeout_seconds=timeout_seconds,
-        )
-    except AgentUnreachableError as e:
-        logger.warning("agent_chat schemas unreachable: %s", e.message)
-        return RouterTurnResult("operational", None, None, {**meta, "error": e.message})
+    """Fetch OpenAI tool schemas and workflow skill blocks in parallel."""
+    meta_out = dict(meta)
+
+    async def _schemas_coro() -> dict[str, Any]:
+        try:
+            return await agent_post_json(
+                settings,
+                "api/cipherstrike/schemas-from-tools",
+                {"tools": tools_objs},
+                timeout_seconds=timeout_seconds,
+            )
+        except AgentUnreachableError as e:
+            return {"success": False, "error": e.message, "_agent_unreachable": True}
+
+    schemas_task = _schemas_coro()
+    skills_task = fetch_skill_blocks_for_meta(settings, meta_out, intent=intent)
+    schema_resp, skill_blocks = await asyncio.gather(schemas_task, skills_task)
+
+    if skill_blocks:
+        meta_out["skill_injection_blocks"] = skill_blocks
+
+    if schema_resp.get("_agent_unreachable"):
+        logger.warning("agent_chat schemas unreachable: %s", schema_resp.get("error"))
+        return RouterTurnResult("operational", None, None, {**meta_out, "error": schema_resp.get("error")})
 
     if not schema_resp.get("success"):
-        return RouterTurnResult("operational", None, None, {**meta, "schemas_error": schema_resp})
+        return RouterTurnResult("operational", None, None, {**meta_out, "schemas_error": schema_resp})
 
     schemas = schema_resp.get("schemas")
     if not isinstance(schemas, list):
         schemas = []
-    return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta)
+    return RouterTurnResult("operational", schemas if schemas else None, router_reply, meta_out)
 
 
 _TARGET_HINT_RE = re.compile(r"https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b")
@@ -1928,6 +1986,7 @@ async def plan_router_turn(
             timeout_seconds=settings.agent_timeout_seconds,
             meta=meta,
             router_reply=None,
+            intent="operational",
         )
 
     router_context = _build_router_context(rows, current_user_message=user_message)
@@ -1948,7 +2007,7 @@ async def plan_router_turn(
     except AgentUnreachableError as e:
         logger.warning("agent_chat route-intent unreachable: %s", e.message)
         meta["route_intent_error"] = e.message
-        fb_objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "route_intent_unreachable")
+        fb_objs = _fallback_tool_objs(by_name, max_pick, meta, "route_intent_unreachable")
         if fb_objs:
             logger.info("agent_chat: using fallback tool schemas after route-intent failure")
             return await _bridge_fetch_tool_schemas(
@@ -1957,6 +2016,7 @@ async def plan_router_turn(
                 timeout_seconds=settings.agent_timeout_seconds,
                 meta=meta,
                 router_reply=None,
+                intent="operational",
             )
         return RouterTurnResult("operational", None, None, meta)
 
@@ -1967,7 +2027,7 @@ async def plan_router_turn(
             meta["router_category"] = rc
 
     if not raw_route.get("success"):
-        fb_objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "route_intent_unsuccessful")
+        fb_objs = _fallback_tool_objs(by_name, max_pick, meta, "route_intent_unsuccessful")
         if fb_objs:
             logger.info("agent_chat: using fallback tool schemas after unsuccessful route-intent response")
             return await _bridge_fetch_tool_schemas(
@@ -1976,6 +2036,7 @@ async def plan_router_turn(
                 timeout_seconds=settings.agent_timeout_seconds,
                 meta=meta,
                 router_reply=None,
+                intent="operational",
             )
         return RouterTurnResult("operational", None, None, meta)
 
@@ -1997,10 +2058,9 @@ async def plan_router_turn(
         if isinstance(n, str) and n.strip() in by_name:
             tools_objs.append(by_name[n.strip()])
     if not tools_objs:
-        fb = _fallback_security_tool_names(by_name, max_pick)
-        if fb:
-            meta["fallback_tool_names"] = fb
-            tools_objs = [by_name[n] for n in fb]
+        fb_objs = _fallback_tool_objs(by_name, max_pick, meta, "router_empty_tool_names")
+        if fb_objs:
+            tools_objs = fb_objs
     if not tools_objs:
         return RouterTurnResult("operational", None, reply, meta)
 
@@ -2010,6 +2070,7 @@ async def plan_router_turn(
         timeout_seconds=settings.agent_timeout_seconds,
         meta=meta,
         router_reply=reply,
+        intent=intent,
     )
 
 
@@ -2074,7 +2135,7 @@ async def maybe_upgrade_router_result_for_llm(
 
     by_name, _ = ctx
     max_pick = max(1, settings.agent_router_max_tools)
-    objs = _annotate_fallback_tool_objs(by_name, max_pick, meta, "schema_recovery_fallback")
+    objs = _fallback_tool_objs(by_name, max_pick, meta, "schema_recovery_fallback")
     if not objs:
         meta["router_recovery"] = "fallback_no_matching_tools"
         return RouterTurnResult("operational", None, rt.router_reply, meta)
@@ -2085,6 +2146,7 @@ async def maybe_upgrade_router_result_for_llm(
         timeout_seconds=settings.agent_timeout_seconds,
         meta=meta,
         router_reply=None,
+        intent=rt.intent if rt.intent == "operational" else "operational",
     )
     mm = dict(merged.meta or {})
     mm["router_recovery"] = mm.get("router_recovery") or "fallback_fetch"
@@ -2680,6 +2742,7 @@ async def execute_tool_slots_follow_up(
     carry_thinking: str | None = None,
     tool_schemas: list[dict[str, Any]] | None = None,
     auto_accept_tools: bool = False,
+    routing: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     """Persist executions for each slot (approve/reject/blocked), optionally patch batch parent row, stream LLM follow-up."""
     needs_exec = any(str(s.get("human_decision") or "").lower() == "approve" for s in slots)
@@ -3144,6 +3207,7 @@ async def execute_tool_slots_follow_up(
         + batch_assistant_turn
         + tool_result_messages
     )
+    await inject_followup_skills(settings, follow_llm, routing)
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -3385,6 +3449,7 @@ async def stream_execute_tool_batch(
         slots=list(ordered),
         tenant_roles=tenant_roles,
         batch_message_id=message_id,
+        routing=msg.get("routing") if isinstance(msg.get("routing"), dict) else None,
     ):
         yield chunk
 
