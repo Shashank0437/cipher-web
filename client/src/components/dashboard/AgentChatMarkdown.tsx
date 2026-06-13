@@ -2,6 +2,7 @@
 
 import { Fragment, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import type { AgentChatAttachment } from "../../lib/agentChat";
 
@@ -117,6 +118,24 @@ function stripAttachmentLinks(
   return result;
 }
 
+/**
+ * LLMs often emit markdown tables on a single line (`| a | b | | c | d |`).
+ * Insert row breaks so remark-gfm can parse them.
+ */
+function normalizeMarkdownTables(md: string): string {
+  return md
+    .split("\n")
+    .map((line) => {
+      if (!line.includes("|") || !/\|[^|\n]+\|/.test(line)) return line;
+      const pipeCount = (line.match(/\|/g) ?? []).length;
+      if (pipeCount < 4) return line;
+      return line
+        .replace(/\|\s+\|(?=[-:])/g, "|\n|")
+        .replace(/\|\s+\|(?![-:])/g, "|\n|");
+    })
+    .join("\n");
+}
+
 export function AgentChatMarkdown({
   text,
   className,
@@ -124,7 +143,7 @@ export function AgentChatMarkdown({
   attachments,
   onDownloadAttachment,
 }: Props) {
-  const trimmed = stripAttachmentLinks(text.trim(), attachments);
+  const trimmed = normalizeMarkdownTables(stripAttachmentLinks(text.trim(), attachments));
 
   const components = useMemo<Components>(() => ({
     p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
@@ -205,13 +224,27 @@ export function AgentChatMarkdown({
       </blockquote>
     ),
     hr: () => <hr className="my-3 border-outline-variant/60" />,
+    table: ({ children }) => (
+      <div className="my-3 w-full max-w-full overflow-x-auto rounded-lg border border-outline-variant/50">
+        <table className="w-full min-w-[280px] border-collapse text-left text-[13px]">{children}</table>
+      </div>
+    ),
+    thead: ({ children }) => <thead className="bg-surface-container-high/80">{children}</thead>,
+    tbody: ({ children }) => <tbody className="divide-y divide-outline-variant/40">{children}</tbody>,
+    tr: ({ children }) => <tr className="border-b border-outline-variant/35 last:border-b-0">{children}</tr>,
+    th: ({ children }) => (
+      <th className="border border-outline-variant/40 px-3 py-2 font-semibold text-on-surface">{children}</th>
+    ),
+    td: ({ children }) => (
+      <td className="border border-outline-variant/35 px-3 py-2 align-top leading-relaxed text-on-surface">{children}</td>
+    ),
   }), [attachments, onDownloadAttachment]);
   if (!trimmed) return null;
 
   if (!collapseToolExecutions) {
     return (
       <div className={className}>
-        <ReactMarkdown components={components}>{trimmed}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{trimmed}</ReactMarkdown>
       </div>
     );
   }
@@ -224,7 +257,7 @@ export function AgentChatMarkdown({
   if (onlyMarkdown) {
     return (
       <div className={className}>
-        <ReactMarkdown components={components}>{trimmed}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{trimmed}</ReactMarkdown>
       </div>
     );
   }
@@ -237,7 +270,7 @@ export function AgentChatMarkdown({
           if (!md) return null;
           return (
             <Fragment key={`md-${i}`}>
-              <ReactMarkdown components={components}>{md}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{md}</ReactMarkdown>
             </Fragment>
           );
         }
@@ -256,7 +289,7 @@ export function AgentChatMarkdown({
               <ToolDetailsChevron className="shrink-0 text-on-surface-variant transition-transform duration-200 group-open:rotate-180" />
             </summary>
             <div className="min-w-0 max-h-[min(320px,50vh)] overflow-y-auto border-t border-outline-variant/35 px-2 py-2">
-              <ReactMarkdown components={components}>{seg.fullBlock}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{seg.fullBlock}</ReactMarkdown>
             </div>
           </details>
         );
