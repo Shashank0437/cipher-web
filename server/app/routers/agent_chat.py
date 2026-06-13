@@ -33,6 +33,9 @@ from app.schemas.agent_chat import (
     AttackChainPlanPreviewOut,
     AttackChainPlanOut,
     AttackChainPlansOut,
+    AttackChainFollowupAcceptBody,
+    AttackChainFollowupAcceptOut,
+    AttackChainFollowupOut,
 )
 from app.services.agent_chat import (
     RouterTurnResult,
@@ -84,9 +87,11 @@ from app.services.agent_client import (
 )
 from app.services.agent_attack_chains import (
     INTELLIGENT_ATTACK_CHAIN_ID,
+    append_attack_chain_followup,
     attack_chain_execution_hint,
     attack_chain_next_tool_only,
     attack_chain_system_note,
+    generate_attack_chain_followup,
     list_attack_chain_plans,
     preview_attack_chain_plan,
 )
@@ -153,6 +158,8 @@ _AGENT_CHAT_SSE_HEADERS = {
 
 
 def _session_out(doc: dict) -> AgentChatSessionOut:
+    ac = doc.get("attack_chain")
+    attack_chain = ac if isinstance(ac, dict) else None
     return AgentChatSessionOut(
         id=str(doc["_id"]),
         title=str(doc.get("title") or "Chat"),
@@ -162,6 +169,7 @@ def _session_out(doc: dict) -> AgentChatSessionOut:
         output_tokens=int(doc.get("output_tokens") or 0),
         num_calls=int(doc.get("num_calls") or 0),
         executed_by=doc.get("executed_by"),
+        attack_chain=attack_chain,
     )
 
 
@@ -256,6 +264,101 @@ async def preview_attack_chain_plan_route(
         operator_note=body.operator_note,
     )
     return AttackChainPlanPreviewOut(**result)
+
+
+@router.post("/sessions/{session_id}/attack-chain-followup", response_model=AttackChainFollowupOut)
+async def post_attack_chain_followup(
+    session_id: str,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AttackChainFollowupOut:
+    settings = get_settings()
+    sid = _oid(session_id)
+    result = await generate_attack_chain_followup(
+        settings,
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+    )
+    return AttackChainFollowupOut(**result)
+
+
+@router.post("/sessions/{session_id}/attack-chain-followup/accept", response_model=AttackChainFollowupAcceptOut)
+async def post_attack_chain_followup_accept(
+    session_id: str,
+    body: AttackChainFollowupAcceptBody,
+    user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> AttackChainFollowupAcceptOut:
+    sid = _oid(session_id)
+    sess = await get_session_owned(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+    )
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    ac = sess.get("attack_chain")
+    pending = ac.get("pending_followup") if isinstance(ac, dict) else None
+
+    steps = [s for s in body.steps if isinstance(s, dict)]
+    if not steps and isinstance(pending, dict):
+        raw_steps = pending.get("steps")
+        if isinstance(raw_steps, list):
+            steps = [s for s in raw_steps if isinstance(s, dict)]
+
+    phases = [p for p in body.attack_phases if isinstance(p, dict)]
+    if not phases and isinstance(pending, dict):
+        raw_phases = pending.get("attack_phases")
+        if isinstance(raw_phases, list):
+            phases = [p for p in raw_phases if isinstance(p, dict)]
+
+    exec_summary = body.executive_summary.strip()
+    if not exec_summary and isinstance(pending, dict):
+        exec_summary = str(pending.get("executive_summary") or "").strip()
+
+    if not steps:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="No follow-up steps to accept")
+
+    result = await append_attack_chain_followup(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        steps=steps,
+        executive_summary=exec_summary,
+        attack_phases=phases,
+    )
+    if not result.get("success"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(result.get("error") or "Accept failed"))
+
+    tool_names = [
+        str(s.get("tool") or "").strip()
+        for s in steps
+        if isinstance(s, dict) and str(s.get("tool") or "").strip()
+    ]
+    note = (
+        f"**AI follow-up plan added** ({len(steps)} step(s)): "
+        f"{', '.join(tool_names)}. Continuing the attack chain in order."
+    )
+    if exec_summary:
+        note += f"\n\n{exec_summary}"
+    await insert_message(
+        db,
+        organization_id=user["organization_id"],
+        user_id=user["_id"],
+        session_id=sid,
+        role="assistant",
+        content=note,
+    )
+
+    return AttackChainFollowupAcceptOut(
+        success=True,
+        attack_chain=result.get("attack_chain"),
+    )
 
 
 @router.post("/sessions", response_model=AgentChatSessionOut)

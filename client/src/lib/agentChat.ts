@@ -12,6 +12,7 @@ export type AgentChatSession = {
   output_tokens?: number;
   num_calls?: number;
   executed_by?: string;
+  attack_chain?: Record<string, unknown> | null;
 };
 
 export type AgentChatSessionStatus = "IN_PROGRESS" | "COMPLETED" | "FAILED";

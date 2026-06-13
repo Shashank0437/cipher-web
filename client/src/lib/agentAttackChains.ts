@@ -50,6 +50,27 @@ export type AttackChainPlanPreview = {
   error?: string | null;
 };
 
+export type AttackChainFollowupPreview = {
+  success: boolean;
+  session_id?: string;
+  target?: string;
+  tools: string[];
+  steps: Array<Record<string, unknown>>;
+  executive_summary?: string | null;
+  attack_paths?: string[];
+  attack_phases?: AttackChainPhase[];
+  planner_source?: string | null;
+  already_generated?: boolean;
+  error?: string | null;
+  message?: string | null;
+};
+
+export type AttackChainFollowupAcceptResult = {
+  success: boolean;
+  attack_chain?: Record<string, unknown> | null;
+  error?: string | null;
+};
+
 const PREFIX = "/workspace/agent-chat";
 
 function bearerHeaders(json = false): Headers {
@@ -131,4 +152,39 @@ export function buildAttackChainPrompt(
     lines.push(`Operator custom prompt: ${note.trim()}`);
   }
   return lines.join("\n");
+}
+
+export async function generateAttackChainFollowup(sessionId: string): Promise<AttackChainFollowupPreview> {
+  const res = await fetch(
+    `${getApiBase()}${PREFIX}/sessions/${encodeURIComponent(sessionId)}/attack-chain-followup`,
+    { method: "POST", headers: bearerHeaders() },
+  );
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  return JSON.parse(text) as AttackChainFollowupPreview;
+}
+
+export async function acceptAttackChainFollowup(
+  sessionId: string,
+  body: {
+    steps?: Array<Record<string, unknown>>;
+    executiveSummary?: string;
+    attackPhases?: AttackChainPhase[];
+  },
+): Promise<AttackChainFollowupAcceptResult> {
+  const res = await fetch(
+    `${getApiBase()}${PREFIX}/sessions/${encodeURIComponent(sessionId)}/attack-chain-followup/accept`,
+    {
+      method: "POST",
+      headers: bearerHeaders(true),
+      body: JSON.stringify({
+        steps: body.steps ?? [],
+        executive_summary: body.executiveSummary?.trim() ?? "",
+        attack_phases: body.attackPhases ?? [],
+      }),
+    },
+  );
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
+  return JSON.parse(text) as AttackChainFollowupAcceptResult;
 }

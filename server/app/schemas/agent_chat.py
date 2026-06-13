@@ -30,6 +30,7 @@ class AgentChatSessionOut(BaseModel):
     output_tokens: int = 0
     num_calls: int = 0
     executed_by: str | None = None
+    attack_chain: dict[str, Any] | None = None
 
 
 class AgentChatSessionIntelligenceOut(BaseModel):
@@ -156,4 +157,31 @@ class AttackChainPlanPreviewOut(BaseModel):
     attack_paths: list[str] = Field(default_factory=list)
     attack_phases: list[dict[str, Any]] = Field(default_factory=list)
     planner_source: str | None = None
+    error: str | None = None
+
+
+class AttackChainFollowupOut(BaseModel):
+    success: bool
+    session_id: str = ""
+    target: str = ""
+    tools: list[str] = Field(default_factory=list)
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    executive_summary: str | None = None
+    attack_paths: list[str] = Field(default_factory=list)
+    attack_phases: list[dict[str, Any]] = Field(default_factory=list)
+    planner_source: str | None = None
+    already_generated: bool = False
+    error: str | None = None
+    message: str | None = None
+
+
+class AttackChainFollowupAcceptBody(BaseModel):
+    steps: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
+    executive_summary: str = Field(default="", max_length=8000)
+    attack_phases: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+
+
+class AttackChainFollowupAcceptOut(BaseModel):
+    success: bool
+    attack_chain: dict[str, Any] | None = None
     error: str | None = None

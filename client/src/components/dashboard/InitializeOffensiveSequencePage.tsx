@@ -28,14 +28,18 @@ import {
   streamAgentChatToolConfirm,
 } from "@/lib/agentChat";
 import {
+  acceptAttackChainFollowup,
   buildAttackChainPrompt,
+  generateAttackChainFollowup,
   listAttackChainPlans,
+  type AttackChainFollowupPreview,
   type AttackChainPlanPreview,
   type AttackChainPlan,
   type AttackChainPhase,
 } from "@/lib/agentAttackChains";
 import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModal";
-import { AttackChainPhaseStrip } from "@/components/dashboard/AttackChainPhaseStrip";
+import { AttackChainFollowupCard } from "@/components/dashboard/AttackChainFollowupCard";
+import { AttackChainPhaseStrip, isAttackChainComplete } from "@/components/dashboard/AttackChainPhaseStrip";
 import { ApiError } from "@/lib/api";
 
 const ATTACK_CHAIN_ICONS: Record<string, string> = {
@@ -45,6 +49,22 @@ const ATTACK_CHAIN_ICONS: Record<string, string> = {
   ai_vuln: "bug_report",
   ai_osint: "public",
 };
+
+function attackChainUiFromSessionDoc(
+  ac: Record<string, unknown> | null | undefined,
+): { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>> } | null {
+  if (!ac || !ac.sequential) return null;
+  const steps = ac.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const phasesRaw = ac.phases;
+  const phases = Array.isArray(phasesRaw)
+    ? (phasesRaw as AttackChainPhase[])
+    : [];
+  return {
+    phases,
+    steps: steps as Array<Record<string, unknown>>,
+  };
+}
 
 type QuickCard = {
   id: string;
@@ -681,6 +701,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [sessionAttackChains, setSessionAttackChains] = useState<
     Record<string, { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>> }>
   >({});
+  const [followupPreview, setFollowupPreview] = useState<AttackChainFollowupPreview | null>(null);
+  const [followupLoading, setFollowupLoading] = useState(false);
+  const [followupDismissedKeys, setFollowupDismissedKeys] = useState<Set<string>>(() => new Set());
+  const followupGenKeyRef = useRef<Record<string, string>>({});
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
   const [orgToolsRows, setOrgToolsRows] = useState<{ name: string; description: string }[]>([]);
   const [orgToolsLoading, setOrgToolsLoading] = useState(false);
@@ -957,6 +981,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   useEffect(() => {
     setPinnedToBottom(true);
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    const session = sessions.find((s) => s.id === selectedSessionId);
+    const ui = attackChainUiFromSessionDoc(session?.attack_chain);
+    if (!ui) return;
+    setSessionAttackChains((prev) => {
+      const cur = prev[selectedSessionId];
+      if (cur && cur.steps.length === ui.steps.length) return prev;
+      return { ...prev, [selectedSessionId]: ui };
+    });
+  }, [selectedSessionId, sessions]);
 
   useEffect(() => {
     if (!pinnedToBottom) return;
@@ -1314,6 +1350,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
               steps: attackChainUi.steps,
             },
           }));
+          delete followupGenKeyRef.current[sessionId!];
+          setFollowupPreview(null);
         }
 
         setPrompt("");
@@ -1450,6 +1488,54 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     [attackChainModalPlan, executeMessage],
   );
 
+  const handleFollowupDismiss = useCallback(() => {
+    if (!selectedSessionId) return;
+    const meta = sessionAttackChains[selectedSessionId];
+    if (meta?.steps.length) {
+      const key = `${selectedSessionId}:${meta.steps.length}`;
+      setFollowupDismissedKeys((prev) => new Set(prev).add(key));
+    }
+    setFollowupPreview(null);
+  }, [selectedSessionId, sessionAttackChains]);
+
+  const handleFollowupContinue = useCallback(async () => {
+    if (!selectedSessionId || !followupPreview?.steps.length) return;
+    setFollowupLoading(true);
+    try {
+      const result = await acceptAttackChainFollowup(selectedSessionId, {
+        steps: followupPreview.steps,
+        executiveSummary: followupPreview.executive_summary ?? undefined,
+        attackPhases: followupPreview.attack_phases ?? undefined,
+      });
+      const ac = result.attack_chain;
+      if (ac && Array.isArray(ac.steps)) {
+        const phases = Array.isArray(ac.phases) ? (ac.phases as AttackChainPhase[]) : [];
+        setSessionAttackChains((prev) => ({
+          ...prev,
+          [selectedSessionId]: {
+            phases,
+            steps: ac.steps as Array<Record<string, unknown>>,
+          },
+        }));
+      }
+      setFollowupPreview(null);
+      const meta = sessionAttackChains[selectedSessionId];
+      if (meta?.steps.length) {
+        const key = `${selectedSessionId}:${meta.steps.length}`;
+        setFollowupDismissedKeys((prev) => new Set(prev).add(key));
+      }
+      await refreshMessages(selectedSessionId);
+      await executeMessage(
+        "Continue the attack chain with the AI follow-up plan — run the next planned tool only.",
+        null,
+      );
+    } catch (err) {
+      setActionErr(formatChatError(err));
+    } finally {
+      setFollowupLoading(false);
+    }
+  }, [selectedSessionId, followupPreview, executeMessage, refreshMessages, sessionAttackChains]);
+
   const handleToolConfirm = useCallback(
     async (assistantMessageId: string, approved: boolean) => {
       if (!selectedSessionId || confirmingId) return;
@@ -1576,6 +1662,56 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     reasoningStreaming ||
     batchToolsRunning ||
     visibleStreamPreview.trim().length > 0;
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setFollowupPreview(null);
+      return;
+    }
+    const meta = sessionAttackChains[selectedSessionId];
+    if (!meta?.steps.length) return;
+    const genKey = `${selectedSessionId}:${meta.steps.length}`;
+    if (followupDismissedKeys.has(genKey)) return;
+    if (!isAttackChainComplete(meta.steps, currentMessages)) return;
+    if (agentActivelyWorking) return;
+
+    if (followupGenKeyRef.current[selectedSessionId] === genKey && followupPreview) return;
+
+    const timer = window.setTimeout(() => {
+      if (followupGenKeyRef.current[selectedSessionId] === genKey && followupPreview) return;
+      followupGenKeyRef.current[selectedSessionId] = genKey;
+      setFollowupLoading(true);
+      void generateAttackChainFollowup(selectedSessionId)
+        .then((preview) => {
+          if (preview.success) setFollowupPreview(preview);
+          else
+            setFollowupPreview({
+              success: false,
+              tools: [],
+              steps: [],
+              error: preview.error ?? "Could not generate follow-up plan",
+            });
+        })
+        .catch((err) => {
+          setFollowupPreview({
+            success: false,
+            tools: [],
+            steps: [],
+            error: formatChatError(err),
+          });
+        })
+        .finally(() => setFollowupLoading(false));
+    }, 3000);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    selectedSessionId,
+    sessionAttackChains,
+    currentMessages,
+    followupDismissedKeys,
+    agentActivelyWorking,
+    followupPreview,
+  ]);
 
   const hasThread =
     selectedSessionId !== null ||
@@ -1806,13 +1942,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           </button>
                         ))}
                   </div>
-
-                  <p className="mt-6 max-w-xl text-center text-[13px] leading-snug text-on-surface-variant">
-                    Use the <span className="font-semibold text-on-surface">Agent</span> /{" "}
-                    <span className="font-semibold text-on-surface">Tool</span> /{" "}
-                    <span className="font-semibold text-on-surface">Plan Attack Chain</span> pills in the prompt bar,
-                    then Execute.
-                  </p>
                 </div>
               ) : (
                 <div className="mx-auto flex min-w-0 w-[min(100%,70%)] flex-col gap-4 pb-2">
@@ -2386,6 +2515,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       phases={sessionAttackChains[selectedSessionId].phases}
                       steps={sessionAttackChains[selectedSessionId].steps}
                       messages={currentMessages}
+                    />
+                  </div>
+                ) : null}
+                {selectedSessionId && followupPreview && !followupDismissedKeys.has(
+                  `${selectedSessionId}:${sessionAttackChains[selectedSessionId]?.steps.length ?? 0}`,
+                ) ? (
+                  <div className="mx-auto mb-2 w-[min(100%,60%)] min-w-0">
+                    <AttackChainFollowupCard
+                      preview={followupPreview}
+                      loading={followupLoading}
+                      onContinue={handleFollowupContinue}
+                      onDismiss={handleFollowupDismiss}
                     />
                   </div>
                 ) : null}

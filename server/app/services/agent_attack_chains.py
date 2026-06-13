@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
+from bson import ObjectId
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.config import Settings
+from app.constants import AGENT_CHAT_SESSIONS_COLLECTION
 from app.services.agent_client import AgentUnreachableError, agent_post_json
 
 INTELLIGENT_ATTACK_CHAIN_ID = "intelligent_attack_chain"
@@ -433,3 +438,254 @@ async def preview_attack_chain_plan(
         "tools": tools,
         "steps": steps,
     }
+
+
+def _reindex_phases(phases: list[dict[str, Any]], offset: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for ph in phases:
+        if not isinstance(ph, dict):
+            continue
+        raw_indices = ph.get("step_indices")
+        if not isinstance(raw_indices, list):
+            continue
+        new_indices = [int(i) + offset for i in raw_indices if isinstance(i, int)]
+        if not new_indices:
+            continue
+        out.append(
+            {
+                "phase": str(ph.get("phase") or "FOLLOWUP"),
+                "label": str(ph.get("label") or "Follow-up"),
+                "step_indices": new_indices,
+            }
+        )
+    return out
+
+
+def _followup_response_from_pending(
+    session_id: str,
+    pending: dict[str, Any],
+    *,
+    already_generated: bool = False,
+) -> dict[str, Any]:
+    steps = pending.get("steps") if isinstance(pending.get("steps"), list) else []
+    tools = _tool_names_from_steps(steps)
+    paths = pending.get("attack_paths")
+    attack_paths = [str(p).strip() for p in paths if str(p).strip()] if isinstance(paths, list) else []
+    phases = pending.get("attack_phases")
+    attack_phases = [p for p in phases if isinstance(p, dict)] if isinstance(phases, list) else []
+    return {
+        "success": True,
+        "session_id": session_id,
+        "target": str(pending.get("target") or ""),
+        "tools": tools,
+        "steps": steps,
+        "executive_summary": str(pending.get("executive_summary") or "") or None,
+        "attack_paths": attack_paths,
+        "attack_phases": attack_phases,
+        "planner_source": str(pending.get("planner_source") or "") or None,
+        "already_generated": already_generated,
+        "message": str(pending.get("message") or "") or None,
+    }
+
+
+async def generate_attack_chain_followup(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+) -> dict[str, Any]:
+    from app.services.agent_chat import get_session_owned, list_messages
+    from app.services.session_intelligence import (
+        build_ai_context,
+        recalculate_session_intelligence,
+    )
+
+    sess = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if not sess:
+        return {"success": False, "error": "Session not found"}
+
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return {"success": False, "error": "Session is not an attack-chain run"}
+
+    pending = ac.get("pending_followup")
+    if isinstance(pending, dict) and isinstance(pending.get("steps"), list) and pending.get("steps"):
+        return _followup_response_from_pending(str(session_id), pending, already_generated=True)
+
+    rows = await list_messages(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    intel = await recalculate_session_intelligence(
+        settings,
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+        use_ai=True,
+    )
+    if not intel:
+        intel = sess.get("session_intelligence") if isinstance(sess.get("session_intelligence"), dict) else {}
+
+    targets = intel.get("targets") if isinstance(intel.get("targets"), list) else []
+    target = str(targets[0] if targets else "").strip()
+    if not target:
+        for step in ac.get("steps") or []:
+            if isinstance(step, dict):
+                params = step.get("parameters")
+                if isinstance(params, dict):
+                    for key in ("target", "url", "domain"):
+                        val = str(params.get(key) or "").strip()
+                        if val:
+                            target = val
+                            break
+                if target:
+                    break
+    if not target:
+        target = "unknown"
+
+    tools_executed = list(intel.get("tools_used") or [])
+    findings = list(intel.get("findings") or [])
+    summary = str(intel.get("summary") or "")
+    objective = str(ac.get("objective") or "comprehensive")
+    operator_note = str(ac.get("operator_note") or "")
+    risk_level = "HIGH" if int((intel.get("findings_count") or {}).get("critical") or 0) > 0 else (
+        "MEDIUM" if int((intel.get("findings_count") or {}).get("high") or 0) > 0 else "LOW"
+    )
+
+    chat_context = build_ai_context(sess, rows)
+
+    payload: dict[str, Any] = {
+        "target": target,
+        "objective": objective,
+        "summary": summary,
+        "risk_level": risk_level,
+        "tools_executed": tools_executed,
+        "findings": findings,
+        "chat_context": chat_context,
+        "operator_note": operator_note,
+    }
+
+    try:
+        raw = await agent_post_json(
+            settings,
+            "api/intelligence/ai-followup-from-context",
+            payload,
+            timeout_seconds=max(settings.agent_timeout_seconds, 120),
+        )
+    except AgentUnreachableError as exc:
+        return {"success": False, "error": exc.message}
+
+    if not raw.get("success"):
+        return {
+            "success": False,
+            "error": str(raw.get("error") or "Follow-up generation failed"),
+        }
+
+    steps = raw.get("workflow_steps")
+    if not isinstance(steps, list):
+        steps = []
+    attack_phases = raw.get("attack_phases")
+    if not isinstance(attack_phases, list):
+        attack_phases = []
+
+    exec_summary = str(raw.get("executive_summary") or "").strip()
+    planner_source = str(raw.get("planner_source") or "llm")
+    message = str(raw.get("message") or "").strip() or None
+
+    pending_followup: dict[str, Any] = {
+        "target": target,
+        "steps": steps[:32],
+        "executive_summary": exec_summary,
+        "attack_phases": attack_phases[:16],
+        "planner_source": planner_source,
+        "attack_paths": [exec_summary[:200]] if exec_summary else [],
+        "message": message,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {
+            "$set": {
+                "attack_chain.pending_followup": pending_followup,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+    return _followup_response_from_pending(str(session_id), pending_followup, already_generated=False)
+
+
+async def append_attack_chain_followup(
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    user_id: ObjectId,
+    session_id: ObjectId,
+    steps: list[dict[str, Any]],
+    executive_summary: str = "",
+    attack_phases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    from app.services.agent_chat import get_session_owned
+
+    sess = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if not sess:
+        return {"success": False, "error": "Session not found"}
+
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return {"success": False, "error": "Session is not an attack-chain run"}
+
+    existing_steps = ac.get("steps")
+    if not isinstance(existing_steps, list):
+        existing_steps = []
+
+    new_steps = [s for s in steps if isinstance(s, dict)][:32]
+    if not new_steps:
+        return {"success": False, "error": "No follow-up steps to append"}
+
+    offset = len(existing_steps)
+    merged_steps = existing_steps + new_steps
+    if len(merged_steps) > 48:
+        merged_steps = merged_steps[:48]
+
+    existing_phases = ac.get("phases")
+    phase_list = list(existing_phases) if isinstance(existing_phases, list) else []
+    new_phases = attack_phases if isinstance(attack_phases, list) else []
+    reindexed = _reindex_phases(new_phases, offset)
+    phase_list.extend(reindexed)
+
+    chain_patch: dict[str, Any] = dict(ac)
+    chain_patch["steps"] = merged_steps
+    chain_patch["phases"] = phase_list[:32]
+    if executive_summary.strip():
+        chain_patch["followup_summary"] = executive_summary.strip()
+    chain_patch["followup_applied_at"] = datetime.now(timezone.utc).isoformat()
+    chain_patch.pop("pending_followup", None)
+
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": session_id, "organization_id": organization_id, "user_id": user_id},
+        {
+            "$set": {
+                "attack_chain": chain_patch,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+    return {"success": True, "attack_chain": chain_patch}

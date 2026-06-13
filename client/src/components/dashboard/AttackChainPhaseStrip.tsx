@@ -59,6 +59,19 @@ function phaseStatus(
   return "pending";
 }
 
+export function isAttackChainComplete(
+  steps: Array<Record<string, unknown>>,
+  messages: AgentChatMessage[],
+): boolean {
+  if (!steps.length) return false;
+  const completed = completedToolsFromMessages(messages);
+  for (const step of steps) {
+    const tn = String(step.tool ?? "").trim().toLowerCase();
+    if (tn && !completed.has(tn)) return false;
+  }
+  return true;
+}
+
 export function AttackChainPhaseStrip({ phases, steps, messages }: AttackChainPhaseStripProps) {
   if (!phases.length) return null;
 
