@@ -234,6 +234,8 @@ ATTACK_CHAIN_FOLLOWUP_SUMMARIZE_SUFFIX = (
 def attack_chain_followup_context(
     sess: dict[str, Any],
     rows: list[dict[str, Any]],
+    *,
+    available_names: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, str]], frozenset[str] | None, str]:
     """System messages, next-tool filter, and summarize suffix for post-tool LLM follow-up."""
     ac = sess.get("attack_chain")
@@ -241,7 +243,7 @@ def attack_chain_followup_context(
         return [], None, ""
 
     system_messages: list[dict[str, str]] = []
-    hint = attack_chain_execution_hint(sess, rows)
+    hint = attack_chain_execution_hint(sess, rows, available_names=available_names)
     if hint:
         system_messages.append({"role": "system", "content": hint})
 
@@ -265,7 +267,7 @@ def attack_chain_followup_context(
             }
         )
 
-    batch_only = attack_chain_next_tool_only(sess, rows)
+    batch_only = attack_chain_next_tool_only(sess, rows, available_names=available_names)
     return system_messages, batch_only, ATTACK_CHAIN_FOLLOWUP_SUMMARIZE_SUFFIX
 
 
@@ -364,6 +366,133 @@ def attack_chain_next_step_index(sess: dict[str, Any], rows: list[dict[str, Any]
     return idx
 
 
+def attack_chain_next_runnable_step_index(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+    available_names: frozenset[str],
+) -> int | None:
+    """Next step index whose tool is installed/enabled in the org catalog."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return None
+    steps = _attack_chain_steps(ac)
+    if not steps:
+        return None
+    avail = {n.strip().lower() for n in available_names if n}
+    if not avail:
+        return None
+    start = attack_chain_effective_step_index(sess, rows)
+    for idx in range(start, len(steps)):
+        tn = _step_tool_name(steps[idx]).lower()
+        if tn and tn in avail:
+            return idx
+    return None
+
+
+def _skipped_unavailable_steps_between(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+    available_names: frozenset[str],
+    *,
+    through_index: int,
+) -> list[dict[str, Any]]:
+    """Steps from effective index up to (not including) through_index that are unavailable."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict):
+        return []
+    steps = _attack_chain_steps(ac)
+    avail = {n.strip().lower() for n in available_names if n}
+    start = attack_chain_effective_step_index(sess, rows)
+    skipped: list[dict[str, Any]] = []
+    for idx in range(start, through_index):
+        if idx < 0 or idx >= len(steps):
+            continue
+        tn = _step_tool_name(steps[idx]).lower()
+        if tn and tn not in avail:
+            skipped.append({"index": idx, "tool": tn, "reason": "not_installed"})
+    return skipped
+
+
+def filter_attack_chain_steps_to_runnable(
+    steps: list[dict[str, Any]],
+    available_names: frozenset[str],
+    phases: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, Any]]]:
+    """Keep only runnable steps; rebuild phase indices. Returns (steps, tools, omitted, phases)."""
+    avail = {n.strip().lower() for n in available_names if n}
+    filtered: list[dict[str, Any]] = []
+    omitted: list[str] = []
+    old_to_new: dict[int, int] = {}
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tn = _step_tool_name(step).lower()
+        if tn and tn in avail:
+            old_to_new[i] = len(filtered)
+            filtered.append(step)
+        elif tn:
+            omitted.append(tn)
+    new_phases: list[dict[str, Any]] = []
+    if phases:
+        for ph in phases:
+            if not isinstance(ph, dict):
+                continue
+            raw_indices = ph.get("step_indices")
+            if not isinstance(raw_indices, list):
+                continue
+            new_indices = [old_to_new[int(i)] for i in raw_indices if isinstance(i, int) and i in old_to_new]
+            if not new_indices:
+                continue
+            new_phases.append(
+                {
+                    "phase": str(ph.get("phase") or "PHASE"),
+                    "label": str(ph.get("label") or ph.get("phase") or "Phase"),
+                    "step_indices": new_indices,
+                }
+            )
+    tools = _tool_names_from_steps(filtered)
+    return filtered, tools, omitted, new_phases
+
+
+async def sync_attack_chain_to_runnable_step(
+    db: AsyncIOMotorDatabase,
+    session_id: ObjectId,
+    *,
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+    available_names: frozenset[str],
+) -> tuple[int | None, list[dict[str, Any]]]:
+    """
+    Advance current_step past unavailable tools; persist skipped_steps.
+    Returns (runnable_index, newly_skipped_entries).
+    """
+    runnable_idx = attack_chain_next_runnable_step_index(sess, rows, available_names)
+    if runnable_idx is None:
+        return None, []
+    effective = attack_chain_effective_step_index(sess, rows)
+    if runnable_idx <= effective:
+        return runnable_idx, []
+    skipped = _skipped_unavailable_steps_between(
+        sess, rows, available_names, through_index=runnable_idx,
+    )
+    ac = sess.get("attack_chain")
+    existing_skipped = []
+    if isinstance(ac, dict) and isinstance(ac.get("skipped_steps"), list):
+        existing_skipped = [x for x in ac.get("skipped_steps") if isinstance(x, dict)]
+    merged_skipped = existing_skipped + skipped
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": session_id},
+        {
+            "$set": {
+                "attack_chain.current_step": runnable_idx,
+                "attack_chain.skipped_steps": merged_skipped,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    return runnable_idx, skipped
+
+
 def attack_chain_tool_at_index(sess: dict[str, Any], step_index: int) -> str | None:
     ac = sess.get("attack_chain")
     if not isinstance(ac, dict):
@@ -399,21 +528,26 @@ def attack_chain_followup_log_line(
     *,
     schemas_offered: list[str] | None = None,
     batch_only: frozenset[str] | None = None,
+    reason: str | None = None,
+    runnable_index: int | None = None,
 ) -> str:
     ac = sess.get("attack_chain")
     if not isinstance(ac, dict) or not ac.get("sequential"):
         return ""
     steps = _attack_chain_steps(ac)
     total = len(steps)
-    idx = attack_chain_next_step_index(sess, rows)
+    idx = runnable_index if runnable_index is not None else attack_chain_next_step_index(sess, rows)
     next_tool = attack_chain_tool_at_index(sess, idx or 0) if idx is not None else None
     offered = schemas_offered or []
     only = sorted(batch_only) if batch_only else []
     step_disp = f"{idx + 1}/{total}" if idx is not None and total else f"done/{total}"
-    return (
+    line = (
         f"attack_chain_followup: step={step_disp} next={next_tool or 'none'} "
         f"schemas_offered={offered} batch_only={only}"
     )
+    if reason:
+        line += f" reason={reason}"
+    return line
 
 
 def _completed_tools_from_rows(rows: list[dict[str, Any]], *, tail: int = 48) -> set[str]:
@@ -443,9 +577,14 @@ def _completed_tools_from_rows(rows: list[dict[str, Any]], *, tail: int = 48) ->
 def attack_chain_next_tool_only(
     sess: dict[str, Any],
     rows: list[dict[str, Any]],
+    *,
+    available_names: frozenset[str] | None = None,
 ) -> frozenset[str] | None:
     """Return frozenset of the next planned tool name for sequential attack-chain sessions."""
-    idx = attack_chain_next_step_index(sess, rows)
+    if available_names is not None:
+        idx = attack_chain_next_runnable_step_index(sess, rows, available_names)
+    else:
+        idx = attack_chain_next_step_index(sess, rows)
     if idx is None:
         return None
     tn = attack_chain_tool_at_index(sess, idx)
@@ -457,6 +596,8 @@ def attack_chain_next_tool_only(
 def attack_chain_execution_hint(
     sess: dict[str, Any],
     rows: list[dict[str, Any]],
+    *,
+    available_names: frozenset[str] | None = None,
 ) -> str | None:
     """Phase-aware hint for the next planned tool in an attack-chain session."""
     ac = sess.get("attack_chain")
@@ -469,7 +610,10 @@ def attack_chain_execution_hint(
     phases = ac.get("phases")
     phase_list = phases if isinstance(phases, list) else []
 
-    next_idx = attack_chain_next_step_index(sess, rows)
+    if available_names is not None:
+        next_idx = attack_chain_next_runnable_step_index(sess, rows, available_names)
+    else:
+        next_idx = attack_chain_next_step_index(sess, rows)
     if next_idx is None:
         return "Attack chain plan: all planned tools have completed. Summarize findings; do not re-run completed tools."
 

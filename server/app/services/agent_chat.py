@@ -42,7 +42,10 @@ from app.services.agent_attack_chains import (
     attack_chain_followup_context,
     attack_chain_followup_log_line,
     attack_chain_next_step_index,
+    attack_chain_next_runnable_step_index,
     attack_chain_next_tool_only,
+    filter_attack_chain_steps_to_runnable,
+    sync_attack_chain_to_runnable_step,
 )
 
 logger = logging.getLogger(__name__)
@@ -1417,6 +1420,7 @@ def build_llm_messages_from_history(
     *,
     extra_system: str | None = None,
     conversation_summary: str | None = None,
+    base_system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Reconstruct an OpenAI-compatible message list from persisted Mongo rows.
 
@@ -1426,7 +1430,8 @@ def build_llm_messages_from_history(
     text on subsequent turns. Legacy rows (pre-refactor) with markdown content get the
     markdown stripped before being fed to the LLM.
     """
-    messages: list[dict[str, Any]] = [{"role": "system", "content": settings.agent_chat_system_prompt}]
+    base = (base_system_prompt or settings.agent_chat_system_prompt).strip()
+    messages: list[dict[str, Any]] = [{"role": "system", "content": base}]
     if conversation_summary and conversation_summary.strip():
         messages.append(
             {
@@ -1790,6 +1795,48 @@ def _is_sequential_attack_chain(sess: dict[str, Any] | None) -> bool:
     return isinstance(ac, dict) and bool(ac.get("sequential"))
 
 
+async def fetch_runnable_tool_name_set(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+) -> frozenset[str] | None:
+    """Lowercase tool names that are org-enabled and installed on the agent host."""
+    ctx = await _load_chat_tool_maps(settings, db, organization_id=organization_id)
+    if ctx is None:
+        return None
+    by_name, _ = ctx
+    return frozenset(k.strip().lower() for k in by_name.keys() if k.strip())
+
+
+async def sanitize_attack_chain_plan_for_org(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    steps: list[dict[str, Any]],
+    phases: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, Any]]]:
+    """Filter plan steps to runnable tools; returns (steps, tools, omitted, phases)."""
+    available = await fetch_runnable_tool_name_set(settings, db, organization_id=organization_id)
+    if not available:
+        return steps, _tool_names_from_steps_list(steps), [], phases or []
+    return filter_attack_chain_steps_to_runnable(steps, available, phases)
+
+
+def _tool_names_from_steps_list(steps: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("tool") or step.get("name") or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 async def resolve_attack_chain_follow_schemas(
     settings: Settings,
     db: AsyncIOMotorDatabase,
@@ -1798,13 +1845,45 @@ async def resolve_attack_chain_follow_schemas(
     sess: dict[str, Any],
     rows: list[dict[str, Any]],
     legacy_pruned: list[dict[str, Any]] | None,
+    session_id: ObjectId | None = None,
 ) -> tuple[list[dict[str, Any]] | None, frozenset[str] | None]:
-    """Rebuild follow-up schemas from session plan; returns (schemas, batch_only)."""
+    """Rebuild follow-up schemas from session plan; skips unavailable tools."""
     if not _is_sequential_attack_chain(sess):
         return legacy_pruned, None
-    batch_only = attack_chain_next_tool_only(sess, rows)
+
+    available = await fetch_runnable_tool_name_set(settings, db, organization_id=organization_id)
+    if not available:
+        logger.warning("attack_chain_followup: agent catalog unreachable; using legacy schemas")
+        return legacy_pruned, None
+
+    runnable_idx, skipped = (
+        await sync_attack_chain_to_runnable_step(
+            db,
+            session_id,
+            sess=sess,
+            rows=rows,
+            available_names=available,
+        )
+        if session_id is not None
+        else (attack_chain_next_runnable_step_index(sess, rows, available), [])
+    )
+
+    if runnable_idx is None:
+        logger.info(
+            attack_chain_followup_log_line(
+                sess,
+                rows,
+                schemas_offered=[],
+                batch_only=None,
+                reason="plan_complete_or_no_runnable_tools",
+            )
+        )
+        return None, None
+
+    batch_only = attack_chain_next_tool_only(sess, rows, available_names=available)
     if not batch_only:
         return None, None
+
     schemas = await fetch_attack_chain_tool_schemas(
         settings,
         db,
@@ -1816,12 +1895,20 @@ async def resolve_attack_chain_follow_schemas(
         for s in (schemas or [])
         if isinstance(s, dict)
     ]
+    reason: str | None = None
+    if not schemas:
+        reason = "tool_not_in_catalog"
+    elif skipped:
+        reason = "skipped_unavailable"
+
     logger.info(
         attack_chain_followup_log_line(
             sess,
             rows,
             schemas_offered=offered,
             batch_only=batch_only,
+            reason=reason,
+            runnable_index=runnable_idx,
         )
     )
     return schemas, batch_only
@@ -2892,6 +2979,14 @@ async def execute_tool_slots_follow_up(
         if isinstance(raw_ts, list):
             resolved_follow_schemas = [x for x in raw_ts if isinstance(x, dict)] or None
 
+    sess_chain = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    from app.services.agent_specialists import validate_specialist_tool_call
+
     ordered = sorted(slots, key=lambda s: int(s.get("slot_index", 0)))
 
     working_slots: list[dict[str, Any]] = []
@@ -2936,22 +3031,43 @@ async def execute_tool_slots_follow_up(
                 },
             )
         elif d == "approve":
-            row.update(
-                {
-                    "run_status": "queued",
-                    "run_started_at": None,
-                    "run_finished_at": None,
-                    "stdout_tail": None,
-                    "stderr_tail": None,
-                    "stdout_truncated": False,
-                    "stderr_truncated": False,
-                    "exit_code": None,
-                    "http_status": None,
-                    "execution_log_tail": None,
-                    "execution_log_truncated": False,
-                    "progress_line": None,
-                },
-            )
+            args = row.get("arguments") if isinstance(row.get("arguments"), dict) else {}
+            scope_err = validate_specialist_tool_call(sess_chain or {}, tn, args) if sess_chain else None
+            if scope_err:
+                ts = _utc_now_iso()
+                row.update(
+                    {
+                        "run_status": "error",
+                        "run_started_at": ts,
+                        "run_finished_at": ts,
+                        "stdout_tail": None,
+                        "stderr_tail": scope_err,
+                        "stdout_truncated": False,
+                        "stderr_truncated": False,
+                        "exit_code": None,
+                        "http_status": 403,
+                        "execution_log_tail": scope_err,
+                        "execution_log_truncated": False,
+                        "progress_line": None,
+                    },
+                )
+            else:
+                row.update(
+                    {
+                        "run_status": "queued",
+                        "run_started_at": None,
+                        "run_finished_at": None,
+                        "stdout_tail": None,
+                        "stderr_tail": None,
+                        "stdout_truncated": False,
+                        "stderr_truncated": False,
+                        "exit_code": None,
+                        "http_status": None,
+                        "execution_log_tail": None,
+                        "execution_log_truncated": False,
+                        "progress_line": None,
+                    },
+                )
         working_slots.append(row)
 
     approve_to_run = [
@@ -2959,18 +3075,13 @@ async def execute_tool_slots_follow_up(
         for s in working_slots
         if str(s.get("human_decision") or "").lower() == "approve"
         and str(s.get("tool_name") or "").strip() not in disabled
+        and str(s.get("run_status") or "") == "queued"
     ]
     approve_to_run.sort(key=lambda s: int(s.get("slot_index", 0)))
     sequential_tool_execution = await _session_attack_chain_sequential(
         db, organization_id, user_id, session_id
     )
     chain_step_at_start: int | None = None
-    sess_chain = await get_session_owned(
-        db,
-        organization_id=organization_id,
-        user_id=user_id,
-        session_id=session_id,
-    )
     if _is_sequential_attack_chain(sess_chain):
         rows_start = await list_messages(
             db,
@@ -3007,6 +3118,30 @@ async def execute_tool_slots_follow_up(
         args = slot.get("arguments") if isinstance(slot.get("arguments"), dict) else {}
         started = _utc_now_iso()
         await prog_q.put(("running", idx, tn, started))
+
+        scope_err: str | None = None
+        if sess_chain:
+            from app.services.agent_specialists import validate_specialist_tool_call
+
+            scope_err = validate_specialist_tool_call(sess_chain, tn, args)
+        if scope_err:
+            fin = _utc_now_iso()
+            prog = {
+                "run_status": "error",
+                "stdout_tail": None,
+                "stderr_tail": scope_err,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "exit_code": None,
+                "http_status": 403,
+                "run_finished_at": fin,
+                "execution_log_tail": scope_err,
+                "execution_log_truncated": False,
+                "progress_line": None,
+            }
+            result_text = json.dumps({"error": scope_err})
+            await prog_q.put(("finished", idx, tn, result_text, prog))
+            return
 
         async def emit_live(payload: dict[str, Any]) -> None:
             await prog_q.put(("stream_progress", idx, tn, payload))
@@ -3368,6 +3503,10 @@ async def execute_tool_slots_follow_up(
         user_id=user_id,
         session_id=session_id,
     )
+    follow_schemas = pruned_batch_follow_schemas
+    available_names = await fetch_runnable_tool_name_set(
+        settings, db, organization_id=organization_id,
+    )
     if isinstance(sess_ac, dict):
         fresh_rows = await list_messages(
             db,
@@ -3375,7 +3514,9 @@ async def execute_tool_slots_follow_up(
             user_id=user_id,
             session_id=session_id,
         )
-        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_ac, fresh_rows)
+        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(
+            sess_ac, fresh_rows, available_names=available_names,
+        )
         for ac_msg in reversed(ac_system):
             follow_llm.insert(0, ac_msg)
         if ac_suffix:
@@ -3385,7 +3526,6 @@ async def execute_tool_slots_follow_up(
                     msg["content"] = content + ac_suffix
                     break
     await inject_followup_skills(settings, follow_llm, routing)
-    follow_schemas = pruned_batch_follow_schemas
     if isinstance(sess_ac, dict):
         follow_schemas, resolved_only = await resolve_attack_chain_follow_schemas(
             settings,
@@ -3394,6 +3534,7 @@ async def execute_tool_slots_follow_up(
             sess=sess_ac,
             rows=fresh_rows,
             legacy_pruned=pruned_batch_follow_schemas,
+            session_id=session_id,
         )
         if resolved_only is not None:
             follow_batch_only = resolved_only
@@ -3451,6 +3592,24 @@ async def _auto_execute_single_tool_sse(
             session_id=session_id,
         )
         chain_step_idx = attack_chain_next_step_index(sess_pre or {}, pre_rows)
+
+    from app.services.agent_specialists import validate_specialist_tool_call
+
+    scope_err = validate_specialist_tool_call(sess_pre or {}, tool_name, args) if sess_pre else None
+    if scope_err:
+        err_txt = json.dumps({"error": scope_err})
+        await insert_message(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            role="tool",
+            content=err_txt,
+            tool_name=tool_name,
+        )
+        yield f"data: [ERROR] {scope_err}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     from app.services.organization_tools import get_disabled_tool_names
 
@@ -3598,6 +3757,9 @@ async def _auto_execute_single_tool_sse(
     )
     follow_batch_only: frozenset[str] | None = None
     follow_schemas = pruned_follow_schemas
+    available_names = await fetch_runnable_tool_name_set(
+        settings, db, organization_id=organization_id,
+    )
     if isinstance(sess_ac, dict):
         fresh_rows = await list_messages(
             db,
@@ -3605,7 +3767,9 @@ async def _auto_execute_single_tool_sse(
             user_id=user_id,
             session_id=session_id,
         )
-        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_ac, fresh_rows)
+        ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(
+            sess_ac, fresh_rows, available_names=available_names,
+        )
         for ac_msg in reversed(ac_system):
             follow_msgs.insert(0, ac_msg)
         if ac_suffix:
@@ -3617,6 +3781,7 @@ async def _auto_execute_single_tool_sse(
             sess=sess_ac,
             rows=fresh_rows,
             legacy_pruned=pruned_follow_schemas,
+            session_id=session_id,
         )
         if resolved_only is not None:
             follow_batch_only = resolved_only
@@ -3715,6 +3880,35 @@ async def stream_follow_up_after_tool(
 ) -> AsyncIterator[str]:
     """Post-tool LLM stream; handles further tool calls like the primary agent stream."""
     roles = list(tenant_roles or [])
+    if batch_only_tool_names and not tool_schemas:
+        blocked = ", ".join(sorted(batch_only_tool_names))
+        text = (
+            f"Next planned attack-chain tool(s) ({blocked}) are not installed or disabled "
+            "in this workspace. Install them on the agent host or enable them for your organization."
+        )
+        await insert_message(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            role="assistant",
+            content=text,
+            routing=routing,
+        )
+        await recalculate_session_intelligence(
+            settings,
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+            use_ai=False,
+        )
+        for i in range(0, len(text), 96):
+            yield f"data: {json.dumps(text[i:i + 96])}\n\n"
+            await _sse_flush_tick()
+        yield "data: [DONE]\n\n"
+        return
+
     timeout = settings.agent_llm_stream_timeout_seconds
     body: dict[str, Any] = {"messages": llm_messages}
     if tool_schemas:

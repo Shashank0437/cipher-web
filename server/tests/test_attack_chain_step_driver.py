@@ -3,9 +3,11 @@
 from app.services.agent_attack_chains import (
     attack_chain_effective_step_index,
     attack_chain_followup_log_line,
+    attack_chain_next_runnable_step_index,
     attack_chain_next_step_index,
     attack_chain_next_tool_only,
     attack_chain_tool_at_index,
+    filter_attack_chain_steps_to_runnable,
 )
 
 
@@ -71,7 +73,42 @@ def test_followup_log_line_format():
     assert "batch_only=['arjun']" in line
 
 
+def test_followup_log_line_includes_reason():
+    steps = [{"tool": t} for t in ["nmap", "httpx", "wpscan"]]
+    sess = _sess(steps, current_step=2)
+    line = attack_chain_followup_log_line(
+        sess,
+        [],
+        schemas_offered=[],
+        batch_only=frozenset({"wpscan"}),
+        reason="tool_not_in_catalog",
+        runnable_index=2,
+    )
+    assert "reason=tool_not_in_catalog" in line
+    assert "next=wpscan" in line
+
+
 def test_non_sequential_returns_none():
     sess = _sess([{"tool": "nmap"}], sequential=False)
     assert attack_chain_next_step_index(sess, []) is None
     assert attack_chain_next_tool_only(sess, []) is None
+
+
+def test_next_runnable_skips_wpscan_when_not_installed():
+    steps = [{"tool": t} for t in ["nmap", "httpx", "wpscan", "nuclei", "ffuf"]]
+    sess = _sess(steps, current_step=2)
+    available = frozenset({"nmap", "httpx", "nuclei", "ffuf"})
+    idx = attack_chain_next_runnable_step_index(sess, [], available)
+    assert idx == 3
+    assert attack_chain_tool_at_index(sess, idx) == "nuclei"
+    only = attack_chain_next_tool_only(sess, [], available_names=available)
+    assert only == frozenset({"nuclei"})
+
+
+def test_filter_steps_to_runnable_omits_wpscan():
+    steps = [{"tool": t} for t in ["nmap", "httpx", "wpscan", "nuclei"]]
+    available = frozenset({"nmap", "httpx", "nuclei", "ffuf"})
+    filtered, tools, omitted, _phases = filter_attack_chain_steps_to_runnable(steps, available)
+    assert omitted == ["wpscan"]
+    assert tools == ["nmap", "httpx", "nuclei"]
+    assert len(filtered) == 3

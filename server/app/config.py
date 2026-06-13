@@ -115,6 +115,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("AGENT_CHAT_SKILLS_DIR"),
     )
+    agent_specialists_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices("AGENT_SPECIALISTS_DIR"),
+    )
 
     # Persona for /workspace/agent-chat (Mongo-backed chat).
     agent_chat_system_prompt: str = (

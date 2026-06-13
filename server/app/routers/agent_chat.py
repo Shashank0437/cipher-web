@@ -36,7 +36,22 @@ from app.schemas.agent_chat import (
     AttackChainFollowupAcceptBody,
     AttackChainFollowupAcceptOut,
     AttackChainFollowupOut,
+    SpecialistAgentOut,
+    SpecialistAgentsOut,
 )
+from app.services.agent_specialists import (
+    get_specialist_agent,
+    list_specialist_agents,
+    new_specialist_session_meta,
+    persist_specialist_state_file,
+    prepare_specialist_session_state,
+    specialist_chat_base_prompt,
+    specialist_session_blocks_tools,
+    specialist_system_note,
+    session_title_prefix,
+    validate_specialist_tool_call,
+)
+from app.services.specialist_orchestrator import enrich_specialist_agent_for_phase, subagent_prompt_snippet
 from app.services.agent_chat import (
     RouterTurnResult,
     _EXPLICIT_RUN_TOOL_RE,
@@ -74,6 +89,8 @@ from app.services.agent_chat import (
     stream_follow_up_after_tool,
     touch_session_ui_context,
     resolve_attack_chain_follow_schemas,
+    sanitize_attack_chain_plan_for_org,
+    fetch_runnable_tool_name_set,
     _run_one_tool_detailed,
     _slot_progress_payload,
     _sse_flush_tick,
@@ -164,6 +181,8 @@ _AGENT_CHAT_SSE_HEADERS = {
 def _session_out(doc: dict) -> AgentChatSessionOut:
     ac = doc.get("attack_chain")
     attack_chain = ac if isinstance(ac, dict) else None
+    sa = doc.get("specialist_agent")
+    specialist_agent = sa if isinstance(sa, dict) else None
     return AgentChatSessionOut(
         id=str(doc["_id"]),
         title=str(doc.get("title") or "Chat"),
@@ -174,6 +193,7 @@ def _session_out(doc: dict) -> AgentChatSessionOut:
         num_calls=int(doc.get("num_calls") or 0),
         executed_by=doc.get("executed_by"),
         attack_chain=attack_chain,
+        specialist_agent=specialist_agent,
     )
 
 
@@ -253,11 +273,20 @@ async def list_attack_chain_plans_route(
     return AttackChainPlansOut(plans=plans)
 
 
+@router.get("/specialist-agents", response_model=SpecialistAgentsOut)
+async def list_specialist_agents_route(
+    user: dict = Depends(require_auth_user),
+) -> SpecialistAgentsOut:
+    agents = [SpecialistAgentOut(**a) for a in list_specialist_agents()]
+    return SpecialistAgentsOut(agents=agents)
+
+
 @router.post("/attack-chain-plans/{plan_id}/preview", response_model=AttackChainPlanPreviewOut)
 async def preview_attack_chain_plan_route(
     plan_id: str,
     body: AttackChainPlanPreviewBody,
     user: dict = Depends(require_auth_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ) -> AttackChainPlanPreviewOut:
     settings = get_settings()
     result = await preview_attack_chain_plan(
@@ -267,6 +296,24 @@ async def preview_attack_chain_plan_route(
         objective=body.objective,
         operator_note=body.operator_note,
     )
+    if result.get("success"):
+        raw_steps = result.get("steps")
+        steps = [s for s in raw_steps if isinstance(s, dict)] if isinstance(raw_steps, list) else []
+        raw_phases = result.get("attack_phases")
+        phases = [p for p in raw_phases if isinstance(p, dict)] if isinstance(raw_phases, list) else None
+        filtered, tools, omitted, new_phases = await sanitize_attack_chain_plan_for_org(
+            settings,
+            db,
+            organization_id=user["organization_id"],
+            steps=steps,
+            phases=phases,
+        )
+        result["steps"] = filtered
+        result["tools"] = tools
+        if omitted:
+            result["omitted_tools"] = omitted
+        if new_phases:
+            result["attack_phases"] = new_phases
     return AttackChainPlanPreviewOut(**result)
 
 
@@ -653,10 +700,34 @@ async def post_message_stream(
     await touch_session_ui_context(db, sid, ctx_dump)
 
     if str(sess.get("title") or "").strip() in ("", "New chat"):
-        auto = body.message.strip()[:50] + ("…" if len(body.message.strip()) > 50 else "")
+        spec_id_init = body.specialist_agent_id.strip()
+        if not spec_id_init:
+            auto = body.message.strip()[:50] + ("…" if len(body.message.strip()) > 50 else "")
+            await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+                {"_id": sid},
+                {"$set": {"title": auto}},
+            )
+
+    spec_id = body.specialist_agent_id.strip()
+    if spec_id and get_specialist_agent(spec_id) and not isinstance(sess.get("specialist_agent"), dict):
+        params: dict[str, Any] = {}
+        for k, v in (body.specialist_agent_params or {}).items():
+            s = str(v).strip()
+            if s:
+                params[str(k)] = s
+        spec_meta = new_specialist_session_meta(spec_id, params)
+        persist_specialist_state_file(spec_meta)
+        target = str(params.get("target") or "")[:40]
+        title = f"{session_title_prefix(spec_id)} {target}".strip()
         await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
             {"_id": sid},
-            {"$set": {"title": auto}},
+            {
+                "$set": {
+                    "specialist_agent": spec_meta,
+                    "title": title,
+                    "updated_at": _utc_now_iso(),
+                }
+            },
         )
 
     attack_chain_steps: list[dict[str, Any]] = [
@@ -666,12 +737,26 @@ async def post_message_stream(
     attack_chain_phases_body = [p for p in body.attack_chain_phases if isinstance(p, dict)]
     attack_chain_planner_src_body = body.attack_chain_planner_source.strip()
     attack_chain_exec_summary_body = body.attack_chain_executive_summary.strip()
+    omitted_tools_body: list[str] = []
+    if attack_chain_steps:
+        filtered_steps, _filtered_tools, omitted_tools_body, filtered_phases = await sanitize_attack_chain_plan_for_org(
+            settings,
+            db,
+            organization_id=user["organization_id"],
+            steps=attack_chain_steps,
+            phases=attack_chain_phases_body or None,
+        )
+        attack_chain_steps = filtered_steps
+        if filtered_phases:
+            attack_chain_phases_body = filtered_phases
     if attack_chain_steps:
         chain_meta: dict[str, Any] = {
             "sequential": True,
             "steps": attack_chain_steps[:32],
             "current_step": 0,
         }
+        if omitted_tools_body:
+            chain_meta["omitted_tools"] = omitted_tools_body
         plan_id = body.attack_chain_plan_id.strip()
         if plan_id:
             chain_meta["plan_id"] = plan_id
@@ -735,6 +820,19 @@ async def post_message_stream(
 
             ctx = body.context.model_dump() if body.context else None
             user_msg = body.message.strip()
+
+            sa_raw = (sess_fresh or {}).get("specialist_agent")
+            if isinstance(sa_raw, dict):
+                sa_updated = prepare_specialist_session_state(sa_raw, rows, user_msg)
+                sa_updated = enrich_specialist_agent_for_phase(sa_updated)
+                if sa_updated != sa_raw:
+                    persist_specialist_state_file(sa_updated)
+                    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+                        {"_id": sid},
+                        {"$set": {"specialist_agent": sa_updated, "updated_at": _utc_now_iso()}},
+                    )
+                    sess_fresh = {**(sess_fresh or {}), "specialist_agent": sa_updated}
+
             explicit_for_turn = list(explicit_tools)
             retry_rejected = (
                 infer_retry_rejected_tool_names(rows)
@@ -754,11 +852,20 @@ async def post_message_stream(
             if retry_rejected:
                 extra_system_parts.append(retry_rejected_tools_system_note(retry_rejected))
             ac_sess = (sess_fresh or {}).get("attack_chain")
+            available_for_chain = await fetch_runnable_tool_name_set(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+            )
             if isinstance(ac_sess, dict) and ac_sess.get("sequential"):
-                hint = attack_chain_execution_hint(sess_fresh or {}, rows)
+                hint = attack_chain_execution_hint(
+                    sess_fresh or {}, rows, available_names=available_for_chain,
+                )
                 if hint:
                     extra_system_parts.append(hint)
-                next_only = attack_chain_next_tool_only(sess_fresh or {}, rows)
+                next_only = attack_chain_next_tool_only(
+                    sess_fresh or {}, rows, available_names=available_for_chain,
+                )
                 if next_only and batch_only is None:
                     batch_only = next_only
             if attack_chain_steps:
@@ -775,11 +882,32 @@ async def post_message_stream(
                         planner_source=attack_chain_planner_src_body or None,
                     )
                 )
+            sa_note = specialist_system_note(
+                sess_fresh or {},
+                specialists_dir=settings.agent_specialists_dir,
+            )
+            if sa_note:
+                extra_system_parts.append(sa_note)
+            sa_meta = (sess_fresh or {}).get("specialist_agent")
+            if isinstance(sa_meta, dict) and str(sa_meta.get("status") or "") == "running":
+                sub_snip = subagent_prompt_snippet(
+                    str(sa_meta.get("id") or ""),
+                    sa_meta.get("phase"),
+                    specialists_dir=settings.agent_specialists_dir,
+                )
+                if sub_snip:
+                    extra_system_parts.append(sub_snip)
+            base_system_prompt = (
+                specialist_chat_base_prompt()
+                if isinstance((sess_fresh or {}).get("specialist_agent"), dict)
+                else None
+            )
             llm_messages = build_llm_messages_from_history(
                 settings,
                 rows,
                 extra_system="\n\n".join(extra_system_parts) if extra_system_parts else None,
                 conversation_summary=summary_str,
+                base_system_prompt=base_system_prompt,
             )
 
             explicit_arg = explicit_for_turn if explicit_for_turn else None
@@ -831,6 +959,9 @@ async def post_message_stream(
                 explicit_tool_names=explicit_arg,
                 rt=rt,
             )
+
+            if specialist_session_blocks_tools(sess_fresh or {}, user_msg):
+                rt = RouterTurnResult("conversational", None, rt.router_reply, dict(rt.meta or {}))
 
             if (
                 rt.intent == "conversational"
@@ -1000,6 +1131,9 @@ async def tool_confirm_stream(
     follow_tool_schemas = raw_follow_ts if isinstance(raw_follow_ts, list) else None
 
     if body.approved:
+        scope_err = validate_specialist_tool_call(sess, tool_name, args)
+        if scope_err:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=scope_err)
         roles = user.get("roles") or []
         if "tenant_admin" not in roles and not _agent_chat_skip_tool_approval_prompt(tool_name):
             raise HTTPException(
@@ -1338,7 +1472,14 @@ async def tool_confirm_stream(
                 user_id=user["_id"],
                 session_id=sid,
             )
-            ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_follow or {}, fresh_rows)
+            available_names = await fetch_runnable_tool_name_set(
+                settings,
+                db,
+                organization_id=user["organization_id"],
+            )
+            ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(
+                sess_follow or {}, fresh_rows, available_names=available_names,
+            )
             for ac_msg in reversed(ac_system):
                 follow_msgs.insert(0, ac_msg)
             if ac_suffix:
@@ -1350,6 +1491,7 @@ async def tool_confirm_stream(
                 sess=sess_follow or {},
                 rows=fresh_rows,
                 legacy_pruned=pruned_follow_schemas,
+                session_id=sid,
             )
             if resolved_batch_only is not None:
                 follow_batch_only = resolved_batch_only

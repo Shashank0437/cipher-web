@@ -13,6 +13,7 @@ export type AgentChatSession = {
   num_calls?: number;
   executed_by?: string;
   attack_chain?: Record<string, unknown> | null;
+  specialist_agent?: Record<string, unknown> | null;
 };
 
 export type AgentChatSessionStatus = "IN_PROGRESS" | "COMPLETED" | "FAILED";
@@ -570,6 +571,8 @@ export async function streamAgentChatMessage(
     attackChainPaths?: string[];
     attackChainPhases?: Array<Record<string, unknown>>;
     attackChainPlannerSource?: string;
+    specialistAgentId?: string;
+    specialistAgentParams?: Record<string, string>;
     onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
@@ -587,6 +590,8 @@ export async function streamAgentChatMessage(
     attack_chain_paths?: string[];
     attack_chain_phases?: Array<Record<string, unknown>>;
     attack_chain_planner_source?: string;
+    specialist_agent_id?: string;
+    specialist_agent_params?: Record<string, string>;
   } = {
     message: message.trim(),
   };
@@ -622,6 +627,12 @@ export async function streamAgentChatMessage(
   }
   if (options?.attackChainPlannerSource?.trim()) {
     body.attack_chain_planner_source = options.attackChainPlannerSource.trim();
+  }
+  if (options?.specialistAgentId?.trim()) {
+    body.specialist_agent_id = options.specialistAgentId.trim();
+  }
+  if (options?.specialistAgentParams && Object.keys(options.specialistAgentParams).length > 0) {
+    body.specialist_agent_params = options.specialistAgentParams;
   }
   await postSse(
     `${PREFIX}/sessions/${sessionId}/messages`,

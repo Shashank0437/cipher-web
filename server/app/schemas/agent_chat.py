@@ -31,6 +31,7 @@ class AgentChatSessionOut(BaseModel):
     num_calls: int = 0
     executed_by: str | None = None
     attack_chain: dict[str, Any] | None = None
+    specialist_agent: dict[str, Any] | None = None
 
 
 class AgentChatSessionIntelligenceOut(BaseModel):
@@ -111,6 +112,32 @@ class AgentChatSendBody(BaseModel):
     attack_chain_paths: list[str] = Field(default_factory=list, max_length=8)
     attack_chain_phases: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     attack_chain_planner_source: str = Field(default="", max_length=32)
+    specialist_agent_id: str = Field(default="", max_length=32)
+    specialist_agent_params: dict[str, Any] = Field(default_factory=dict)
+
+
+class SpecialistAgentPresetOut(BaseModel):
+    value: str
+    label: str
+
+
+class SpecialistAgentOut(BaseModel):
+    id: str
+    title: str
+    badge: str
+    description: str
+    modal_description: str
+    specialist_count: int
+    featured: bool = False
+    placeholder_target: str
+    placeholder_goal: str = ""
+    presets: list[SpecialistAgentPresetOut] = Field(default_factory=list)
+    default_preset: str = ""
+    fields: list[str] = Field(default_factory=list)
+
+
+class SpecialistAgentsOut(BaseModel):
+    agents: list[SpecialistAgentOut]
 
 
 class AgentChatToolConfirmBody(BaseModel):
@@ -158,6 +185,7 @@ class AttackChainPlanPreviewOut(BaseModel):
     attack_phases: list[dict[str, Any]] = Field(default_factory=list)
     planner_source: str | None = None
     error: str | None = None
+    omitted_tools: list[str] = Field(default_factory=list)
 
 
 class AttackChainFollowupOut(BaseModel):

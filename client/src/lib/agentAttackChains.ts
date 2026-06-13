@@ -48,6 +48,7 @@ export type AttackChainPlanPreview = {
   attack_phases?: AttackChainPhase[];
   planner_source?: string | null;
   error?: string | null;
+  omitted_tools?: string[];
 };
 
 export type AttackChainFollowupPreview = {

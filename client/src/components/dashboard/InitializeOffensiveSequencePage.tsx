@@ -41,6 +41,14 @@ import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModa
 import { AttackChainFollowupCard } from "@/components/dashboard/AttackChainFollowupCard";
 import { AttackChainPhaseStrip, isAttackChainComplete } from "@/components/dashboard/AttackChainPhaseStrip";
 import { AttackChainWorkspaceSection } from "@/components/dashboard/AttackChainWorkspaceSection";
+import { SpecialistAgentWorkspaceSection } from "@/components/dashboard/SpecialistAgentWorkspaceSection";
+import { SpecialistAgentModal } from "@/components/dashboard/SpecialistAgentModal";
+import {
+  buildSpecialistInvocation,
+  fetchSpecialistAgents,
+  type SpecialistAgentParams,
+  type SpecialistAgentPlan,
+} from "@/lib/agentSpecialists";
 import { ApiError } from "@/lib/api";
 
 function attackChainUiFromSessionDoc(
@@ -62,44 +70,6 @@ function attackChainUiFromSessionDoc(
   };
 }
 
-type QuickCard = {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-  promptSeed: string;
-};
-
-const QUICK_CARDS: QuickCard[] = [
-  {
-    id: "recon",
-    title: "Recon my domain",
-    description: "Passive OSINT and sub-domain enumeration",
-    icon: "travel_explore",
-    promptSeed: "Run passive OSINT and subdomain enumeration on ",
-  },
-  {
-    id: "cve",
-    title: "Analyze target for CVEs",
-    description: "Version detection and vulnerability mapping",
-    icon: "shield_lock",
-    promptSeed: "Analyze the target for CVEs — version detection and vulnerability mapping for ",
-  },
-  {
-    id: "sqli",
-    title: "Craft SQLi Payload",
-    description: "Tailored bypass strings for specific DB engines",
-    icon: "code",
-    promptSeed: "Craft tailored SQL injection payloads for MySQL for ",
-  },
-  {
-    id: "network",
-    title: "Network Scan",
-    description: "Stealth port scanning and service fingerprinting",
-    icon: "radar",
-    promptSeed: "Run a stealth port scan and service fingerprinting against ",
-  },
-];
 
 /** Distance-from-bottom threshold to treat transcript as “following” newest content */
 const TRANSCRIPT_BOTTOM_PIN_PX = 64;
@@ -108,6 +78,36 @@ function formatChatError(err: unknown): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return err.message;
   return "Something went wrong.";
+}
+
+type SpecialistSessionMeta = {
+  id: string;
+  title: string;
+  status: string;
+  phase: string | null;
+  awaitingConfirmation: boolean;
+  activeSubagent: string | null;
+};
+
+function specialistSessionMeta(
+  raw: Record<string, unknown> | null | undefined,
+): SpecialistSessionMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const id = String(raw.id ?? "").trim();
+  if (!id) return null;
+  const titles: Record<string, string> = {
+    "htb-ctf": "HTB CTF",
+    bugbounty: "Bug Bounty",
+    recon: "Recon",
+  };
+  return {
+    id,
+    title: titles[id] ?? id,
+    status: String(raw.status ?? "planning"),
+    phase: raw.phase ? String(raw.phase) : null,
+    awaitingConfirmation: Boolean(raw.awaiting_confirmation),
+    activeSubagent: raw.active_subagent ? String(raw.active_subagent) : null,
+  };
 }
 
 /** LLM follow-up sometimes pastes the same raw tool JSON as its own assistant message — hide that duplicate bubble. */
@@ -450,7 +450,7 @@ const ROTATING_PROMPTS = [
   "Conduct a standard web penetration test against https://example.com and summarize findings with next steps.",
 ];
 
-type ComposerMode = "agent" | "tool" | "plan";
+type ComposerMode = "none" | "agent" | "tool" | "plan";
 
 type ClaudePromptBoxProps = {
   textareaId: string;
@@ -530,8 +530,8 @@ function VrikaClaudePromptBox({
         >
           <button
             type="button"
-            onClick={() => onComposerModeChange("agent")}
-            aria-label="Agent mode — free-form mission prompt"
+            onClick={() => onComposerModeChange(composerMode === "agent" ? "none" : "agent")}
+            aria-label="Agent mode — specialist agent pipelines"
             className={`${pillBase} items-center ${
               composerMode === "agent"
                 ? "border-primary/35 bg-primary-container/55 text-primary"
@@ -567,7 +567,7 @@ function VrikaClaudePromptBox({
           {showPlanAttackChain ? (
             <button
               type="button"
-              onClick={() => onComposerModeChange("plan")}
+              onClick={() => onComposerModeChange(composerMode === "plan" ? "none" : "plan")}
               aria-label="Attack chain pipelines — scroll to predefined and intelligent chains"
               className={`${pillBase} items-center ${
                 composerMode === "plan"
@@ -688,8 +688,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [batchDecisionsBusyId, setBatchDecisionsBusyId] = useState<string | null>(null);
   const [toolExecutionMode, setToolExecutionMode] = useState<AgentChatToolExecutionMode>("ask_permission");
   const [explicitToolNames, setExplicitToolNames] = useState<string[] | null>(null);
-  const [composerMode, setComposerMode] = useState<ComposerMode>("agent");
+  const [composerMode, setComposerMode] = useState<ComposerMode>("none");
   const [attackChainPlans, setAttackChainPlans] = useState<AttackChainPlan[]>([]);
+  const [specialistAgents, setSpecialistAgents] = useState<SpecialistAgentPlan[]>([]);
+  const [specialistAgentsError, setSpecialistAgentsError] = useState<string | null>(null);
+  const [specialistModalAgent, setSpecialistModalAgent] = useState<SpecialistAgentPlan | null>(null);
+  const [specialistModalOpen, setSpecialistModalOpen] = useState(false);
+  const [specialistStarting, setSpecialistStarting] = useState(false);
+  const [specialistModalError, setSpecialistModalError] = useState<string | null>(null);
   const [attackChainModalPlan, setAttackChainModalPlan] = useState<AttackChainPlan | null>(null);
   const [attackChainModalOpen, setAttackChainModalOpen] = useState(false);
   const [attackChainStarting, setAttackChainStarting] = useState(false);
@@ -949,12 +955,20 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
 
   useEffect(() => {
     let cancelled = false;
-    void listAttackChainPlans()
-      .then((plans) => {
-        if (!cancelled) setAttackChainPlans(plans);
+    void Promise.all([listAttackChainPlans(), fetchSpecialistAgents()])
+      .then(([plans, agents]) => {
+        if (!cancelled) {
+          setAttackChainPlans(plans);
+          setSpecialistAgents(agents);
+          setSpecialistAgentsError(null);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setAttackChainPlans([]);
+      .catch((err) => {
+        if (!cancelled) {
+          setAttackChainPlans([]);
+          setSpecialistAgents([]);
+          setSpecialistAgentsError(formatChatError(err));
+        }
       });
     return () => {
       cancelled = true;
@@ -1089,9 +1103,6 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     );
   });
 
-  const onCardClick = useCallback((seed: string) => {
-    setPrompt((p) => (p.trim() ? `${p.trim()}\n${seed}` : seed));
-  }, []);
 
   const handleDeleteSession = useCallback(
     async (sessionId: string, e: MouseEvent) => {
@@ -1326,6 +1337,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         phases: AttackChainPhase[];
         steps: Array<Record<string, unknown>>;
       },
+      specialistMeta?: {
+        agentId: string;
+        params: SpecialistAgentParams;
+        forceNewSession?: boolean;
+      },
     ) => {
       const trimmed = text.trim();
       if (!trimmed || isSending) return;
@@ -1337,7 +1353,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       let sessionId = selectedSessionId;
       try {
         setActionErr(null);
-        if (!sessionId) {
+        if (specialistMeta?.forceNewSession || !sessionId) {
           const s = await createAgentChatSession("");
           sessionId = s.id;
           setSessions((prev) => [s, ...prev]);
@@ -1389,6 +1405,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           attackChainPaths: attackChainMeta?.paths,
           attackChainPhases: attackChainMeta?.phases,
           attackChainPlannerSource: attackChainMeta?.plannerSource,
+          specialistAgentId: specialistMeta?.agentId,
+          specialistAgentParams: specialistMeta?.params,
           onEvent: attachStreamHandlers(sessionId),
         });
       } catch (e) {
@@ -1456,7 +1474,42 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         document.getElementById("attack-chain-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     }
+    if (mode === "agent") {
+      requestAnimationFrame(() => {
+        document.getElementById("specialist-agent-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
   }, []);
+
+  const openSpecialistAgentModal = useCallback((agent: SpecialistAgentPlan) => {
+    setComposerMode("agent");
+    setSpecialistModalAgent(agent);
+    setSpecialistModalError(null);
+    setSpecialistModalOpen(true);
+  }, []);
+
+  const handleSpecialistAgentStart = useCallback(
+    async (params: SpecialistAgentParams) => {
+      if (!specialistModalAgent) return;
+      setSpecialistStarting(true);
+      setSpecialistModalError(null);
+      try {
+        const msg = buildSpecialistInvocation(specialistModalAgent.id, params);
+        setComposerMode("agent");
+        setSpecialistModalOpen(false);
+        await executeMessage(msg, null, null, undefined, undefined, {
+          agentId: specialistModalAgent.id,
+          params,
+          forceNewSession: true,
+        });
+      } catch (err) {
+        setSpecialistModalError(formatChatError(err));
+      } finally {
+        setSpecialistStarting(false);
+      }
+    },
+    [specialistModalAgent, executeMessage],
+  );
 
   const handleAttackChainStart = useCallback(
     async (target: string, note: string, preview: AttackChainPlanPreview) => {
@@ -1738,6 +1791,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     isSending ||
     confirmingId;
 
+  const selectedSpecialistMeta = specialistSessionMeta(
+    sessions.find((s) => s.id === selectedSessionId)?.specialist_agent ?? null,
+  );
+
   useEffect(() => {
     if (hasThread) return;
     setRotatingPromptIndex(0);
@@ -1748,8 +1805,8 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   }, [hasThread]);
 
   useEffect(() => {
-    if (hasThread && composerMode === "plan") {
-      setComposerMode("agent");
+    if (hasThread && (composerMode === "plan" || composerMode === "agent")) {
+      setComposerMode("none");
     }
   }, [hasThread, composerMode]);
 
@@ -1910,7 +1967,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     <p className="mt-2 max-w-lg text-[15px] leading-relaxed text-on-surface-variant">
                       {composerMode === "plan"
                         ? "Choose Intelligent Attack Chain or a fixed pipeline — click a card to set your target and preview the tool sequence."
-                        : "Deploy specialized agents to perform deep reconnaissance, vulnerability analysis, or automated exploit crafting."}
+                        : composerMode === "agent"
+                          ? "Choose a specialist agent — configure your target and goal. The leader builds a plan and waits for your confirmation before any tools run."
+                          : "Select Agent or Plan Attack Chain below to load templates."}
                     </p>
                   </div>
 
@@ -1921,33 +1980,19 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                         onSelectPlan={(plan) => openAttackChainModal(plan)}
                       />
                     </div>
-                  ) : (
-                    <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-                      {QUICK_CARDS.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          onClick={() => onCardClick(c.promptSeed)}
-                          className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/40"
-                        >
-                          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
-                            <MaterialSymbol name={c.icon} className="text-2xl" filled />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="font-bold text-on-surface">{c.title}</p>
-                            <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{c.description}</p>
-                            <span className="mt-2 inline-flex items-center gap-1 text-[12px] font-bold text-primary">
-                              Use template
-                              <MaterialSymbol
-                                name="chevron_right"
-                                className="text-[16px] transition group-hover:translate-x-0.5"
-                              />
-                            </span>
-                          </div>
-                        </button>
-                      ))}
+                  ) : composerMode === "agent" ? (
+                    <div className="mt-8 w-full">
+                      {specialistAgentsError ? (
+                        <p className="mb-4 rounded-xl border border-error/30 bg-error/10 px-4 py-3 text-[13px] text-error">
+                          Could not load specialist agents: {specialistAgentsError}
+                        </p>
+                      ) : null}
+                      <SpecialistAgentWorkspaceSection
+                        agents={specialistAgents}
+                        onSelectAgent={(agent) => openSpecialistAgentModal(agent)}
+                      />
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ) : (
                 <div className="mx-auto flex min-w-0 w-[min(100%,70%)] flex-col gap-4 pb-2">
@@ -1955,6 +2000,12 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                     <p className="text-[13px] text-on-surface-variant">Loading messages…</p>
                   ) : null}
                   {visibleMessages.map((m, idx) => {
+                    const lastAssistantIdx = (() => {
+                      for (let j = visibleMessages.length - 1; j >= 0; j--) {
+                        if (visibleMessages[j]?.role === "assistant") return j;
+                      }
+                      return -1;
+                    })();
                     if (m.role === "tool") {
                       return null;
                     }
@@ -2033,6 +2084,32 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                           : "mr-auto w-full max-w-[min(100%,48rem)] sm:max-w-[min(100%,52rem)] lg:max-w-[min(100%,58rem)] xl:max-w-[min(100%,62rem)] items-start"
                       }`}
                     >
+                      {m.role === "assistant" && selectedSpecialistMeta ? (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-primary/25 bg-primary-container/25 px-2.5 py-1.5 text-[11px] text-on-surface-variant">
+                          <span className="font-semibold uppercase tracking-wide text-primary">
+                            {selectedSpecialistMeta.title}
+                          </span>
+                          <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 font-mono text-[11px]">
+                            {selectedSpecialistMeta.status}
+                          </span>
+                          {selectedSpecialistMeta.phase ? (
+                            <span className="rounded-md bg-primary/14 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
+                              phase: {selectedSpecialistMeta.phase}
+                            </span>
+                          ) : null}
+                          {selectedSpecialistMeta.activeSubagent ? (
+                            <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 font-mono text-[11px]">
+                              subagent: {selectedSpecialistMeta.activeSubagent}
+                            </span>
+                          ) : null}
+                          {selectedSpecialistMeta.awaitingConfirmation &&
+                          idx === lastAssistantIdx ? (
+                            <span className="rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+                              Awaiting your confirmation — type yes to proceed
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
                       {m.role === "assistant" && (m.thinking_content ?? "").trim() ? (
                         <details className="group w-full">
                           <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-left text-[13px] text-on-surface-variant marker:content-none hover:text-on-surface [&::-webkit-details-marker]:hidden">
@@ -2596,6 +2673,18 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
             onStart={handleAttackChainStart}
             starting={attackChainStarting}
             error={attackChainModalError}
+          />
+
+          <SpecialistAgentModal
+            agent={specialistModalAgent}
+            open={specialistModalOpen}
+            onClose={() => {
+              setSpecialistModalOpen(false);
+              setSpecialistModalError(null);
+            }}
+            onStart={handleSpecialistAgentStart}
+            starting={specialistStarting}
+            error={specialistModalError}
           />
 
           {toolPickerOpen ? (
