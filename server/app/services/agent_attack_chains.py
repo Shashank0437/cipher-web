@@ -313,6 +313,109 @@ def _parse_intelligent_preview(raw: dict[str, Any], target: str, objective: str)
     }
 
 
+def _step_tool_name(step: dict[str, Any] | None) -> str:
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get("tool") or step.get("name") or "").strip()
+
+
+def _attack_chain_steps(ac: dict[str, Any]) -> list[dict[str, Any]]:
+    steps = ac.get("steps")
+    if not isinstance(steps, list):
+        return []
+    return [s for s in steps if isinstance(s, dict)]
+
+
+def attack_chain_effective_step_index(sess: dict[str, Any], rows: list[dict[str, Any]]) -> int:
+    """0-based index of the next step to run (equals completed step count when sequential)."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return 0
+    steps = _attack_chain_steps(ac)
+    if not steps:
+        return 0
+
+    stored = ac.get("current_step")
+    if isinstance(stored, int) and stored >= 0:
+        return min(stored, len(steps))
+
+    # Legacy sessions without current_step: infer from ordered tool completions.
+    completed_names = _completed_tools_from_rows(rows)
+    idx = 0
+    for step in steps:
+        tn = _step_tool_name(step).lower()
+        if tn and tn in completed_names:
+            idx += 1
+        else:
+            break
+    return min(idx, len(steps))
+
+
+def attack_chain_next_step_index(sess: dict[str, Any], rows: list[dict[str, Any]]) -> int | None:
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return None
+    steps = _attack_chain_steps(ac)
+    if not steps:
+        return None
+    idx = attack_chain_effective_step_index(sess, rows)
+    if idx >= len(steps):
+        return None
+    return idx
+
+
+def attack_chain_tool_at_index(sess: dict[str, Any], step_index: int) -> str | None:
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict):
+        return None
+    steps = _attack_chain_steps(ac)
+    if step_index < 0 or step_index >= len(steps):
+        return None
+    tn = _step_tool_name(steps[step_index])
+    return tn or None
+
+
+async def advance_attack_chain_step(
+    db: AsyncIOMotorDatabase,
+    session_id: ObjectId,
+    *,
+    completed_step_index: int,
+) -> None:
+    """Persist next step index after a planned tool completes."""
+    await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
+        {"_id": session_id},
+        {
+            "$set": {
+                "attack_chain.current_step": completed_step_index + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+
+def attack_chain_followup_log_line(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    schemas_offered: list[str] | None = None,
+    batch_only: frozenset[str] | None = None,
+) -> str:
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return ""
+    steps = _attack_chain_steps(ac)
+    total = len(steps)
+    idx = attack_chain_next_step_index(sess, rows)
+    next_tool = attack_chain_tool_at_index(sess, idx or 0) if idx is not None else None
+    offered = schemas_offered or []
+    only = sorted(batch_only) if batch_only else []
+    step_disp = f"{idx + 1}/{total}" if idx is not None and total else f"done/{total}"
+    return (
+        f"attack_chain_followup: step={step_disp} next={next_tool or 'none'} "
+        f"schemas_offered={offered} batch_only={only}"
+    )
+
+
 def _completed_tools_from_rows(rows: list[dict[str, Any]], *, tail: int = 48) -> set[str]:
     completed: set[str] = set()
     for m in rows[-tail:]:
@@ -342,20 +445,13 @@ def attack_chain_next_tool_only(
     rows: list[dict[str, Any]],
 ) -> frozenset[str] | None:
     """Return frozenset of the next planned tool name for sequential attack-chain sessions."""
-    ac = sess.get("attack_chain")
-    if not isinstance(ac, dict) or not ac.get("sequential"):
+    idx = attack_chain_next_step_index(sess, rows)
+    if idx is None:
         return None
-    steps = ac.get("steps")
-    if not isinstance(steps, list):
+    tn = attack_chain_tool_at_index(sess, idx)
+    if not tn:
         return None
-    completed = _completed_tools_from_rows(rows)
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        tn = str(step.get("tool") or step.get("name") or "").strip().lower()
-        if tn and tn not in completed:
-            return frozenset({tn})
-    return None
+    return frozenset({tn.lower()})
 
 
 def attack_chain_execution_hint(
@@ -366,31 +462,24 @@ def attack_chain_execution_hint(
     ac = sess.get("attack_chain")
     if not isinstance(ac, dict) or not ac.get("sequential"):
         return None
-    steps = ac.get("steps")
-    if not isinstance(steps, list) or not steps:
+    steps = _attack_chain_steps(ac)
+    if not steps:
         return None
 
     phases = ac.get("phases")
     phase_list = phases if isinstance(phases, list) else []
-    completed = _completed_tools_from_rows(rows)
 
-    next_idx: int | None = None
-    next_tool: str | None = None
-    for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            continue
-        tn = str(step.get("tool") or step.get("name") or "").strip()
-        if tn and tn.lower() not in completed:
-            next_idx = i
-            next_tool = tn
-            break
+    next_idx = attack_chain_next_step_index(sess, rows)
+    if next_idx is None:
+        return "Attack chain plan: all planned tools have completed. Summarize findings; do not re-run completed tools."
 
+    next_tool = attack_chain_tool_at_index(sess, next_idx)
     if not next_tool:
         return "Attack chain plan: all planned tools have completed. Summarize findings; do not re-run completed tools."
 
-    phase_label = _phase_label_for_step_index(phase_list, next_idx or 0)
-    total = len([s for s in steps if isinstance(s, dict) and str(s.get("tool") or "").strip()])
-    done = len(completed)
+    phase_label = _phase_label_for_step_index(phase_list, next_idx)
+    total = len(steps)
+    done = attack_chain_effective_step_index(sess, rows)
     phase_part = f"Current phase: {phase_label}. " if phase_label else ""
     return (
         f"Attack chain progress: {done}/{total} tools completed. "

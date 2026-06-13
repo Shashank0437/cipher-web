@@ -73,7 +73,7 @@ from app.services.agent_chat import (
     stream_execute_tool_batch,
     stream_follow_up_after_tool,
     touch_session_ui_context,
-    _augment_follow_schemas_for_attack_chain,
+    resolve_attack_chain_follow_schemas,
     _run_one_tool_detailed,
     _slot_progress_payload,
     _sse_flush_tick,
@@ -88,9 +88,11 @@ from app.services.agent_client import (
 )
 from app.services.agent_attack_chains import (
     INTELLIGENT_ATTACK_CHAIN_ID,
+    advance_attack_chain_step,
     append_attack_chain_followup,
     attack_chain_execution_hint,
     attack_chain_followup_context,
+    attack_chain_next_step_index,
     attack_chain_next_tool_only,
     attack_chain_system_note,
     generate_attack_chain_followup,
@@ -668,6 +670,7 @@ async def post_message_stream(
         chain_meta: dict[str, Any] = {
             "sequential": True,
             "steps": attack_chain_steps[:32],
+            "current_step": 0,
         }
         plan_id = body.attack_chain_plan_id.strip()
         if plan_id:
@@ -1075,6 +1078,15 @@ async def tool_confirm_stream(
                 yield "data: [DONE]\n\n"
                 return
 
+            chain_step_idx: int | None = None
+            rows_pre = await list_messages(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+            )
+            chain_step_idx = attack_chain_next_step_index(sess, rows_pre)
+
             if agent_path_not_allowed(endpoint):
                 yield "data: [ERROR] Tool endpoint is not allowed.\n\n"
                 yield "data: [DONE]\n\n"
@@ -1262,6 +1274,18 @@ async def tool_confirm_stream(
                 session_id=sid,
                 use_ai=False,
             )
+            if chain_step_idx is not None:
+                await advance_attack_chain_step(
+                    db,
+                    sid,
+                    completed_step_index=chain_step_idx,
+                )
+            sess_follow = await get_session_owned(
+                db,
+                organization_id=user["organization_id"],
+                user_id=user["_id"],
+                session_id=sid,
+            ) or sess
 
             yield _sse_tool_batch_slot_progress(
                 aid,
@@ -1314,18 +1338,21 @@ async def tool_confirm_stream(
                 user_id=user["_id"],
                 session_id=sid,
             )
-            ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess or {}, fresh_rows)
+            ac_system, follow_batch_only, ac_suffix = attack_chain_followup_context(sess_follow or {}, fresh_rows)
             for ac_msg in reversed(ac_system):
                 follow_msgs.insert(0, ac_msg)
             if ac_suffix:
                 summarize_system["content"] = summarize_system["content"] + ac_suffix
-            pruned_follow_schemas = await _augment_follow_schemas_for_attack_chain(
+            follow_schemas, resolved_batch_only = await resolve_attack_chain_follow_schemas(
                 settings,
                 db,
-                user["organization_id"],
-                follow_batch_only,
-                pruned_follow_schemas,
+                organization_id=user["organization_id"],
+                sess=sess_follow or {},
+                rows=fresh_rows,
+                legacy_pruned=pruned_follow_schemas,
             )
+            if resolved_batch_only is not None:
+                follow_batch_only = resolved_batch_only
             await inject_followup_skills(
                 settings,
                 follow_msgs,
@@ -1338,7 +1365,7 @@ async def tool_confirm_stream(
                 user_id=user["_id"],
                 session_id=sid,
                 llm_messages=follow_msgs,
-                tool_schemas=pruned_follow_schemas,
+                tool_schemas=follow_schemas,
                 batch_only_tool_names=follow_batch_only,
                 batch_exclude_tool_names=frozenset({ran_tool_lower}),
             ):

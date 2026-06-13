@@ -38,7 +38,10 @@ from app.services.session_intelligence import recalculate_session_intelligence
 from app.services.tool_run_stream import drain_tool_run_stream
 from app.services.agent_skills import fetch_skill_blocks_for_meta, inject_followup_skills
 from app.services.agent_attack_chains import (
+    advance_attack_chain_step,
     attack_chain_followup_context,
+    attack_chain_followup_log_line,
+    attack_chain_next_step_index,
     attack_chain_next_tool_only,
 )
 
@@ -1744,21 +1747,31 @@ async def _augment_follow_schemas_for_attack_chain(
     """Ensure the next attack-chain tool is callable even if it was not in the original turn schemas."""
     if not batch_only:
         return pruned_schemas
-    out = [s for s in (pruned_schemas or []) if isinstance(s, dict)]
-    existing = {
-        str((s.get("function") or {}).get("name") or s.get("name") or "").strip().lower()
-        for s in out
-    }
-    missing = [t for t in batch_only if t.strip().lower() not in existing]
-    if not missing:
-        return out or None
+    return await fetch_attack_chain_tool_schemas(
+        settings,
+        db,
+        organization_id=organization_id,
+        next_tool_names=batch_only,
+    )
+
+
+async def fetch_attack_chain_tool_schemas(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    next_tool_names: frozenset[str],
+) -> list[dict[str, Any]] | None:
+    """Fetch OpenAI tool schemas for the next attack-chain step only (ignores decaying snapshots)."""
+    if not next_tool_names:
+        return None
     ctx = await _load_chat_tool_maps(settings, db, organization_id=organization_id)
     if ctx is None:
-        return out or None
+        return None
     by_name, _ = ctx
-    objs = [by_name[n] for n in missing if n in by_name]
+    objs = [by_name[n] for n in sorted(next_tool_names) if n in by_name]
     if not objs:
-        return out or None
+        return None
     rt = await _bridge_fetch_tool_schemas(
         settings,
         objs,
@@ -1766,10 +1779,52 @@ async def _augment_follow_schemas_for_attack_chain(
         meta={},
         intent="operational",
     )
-    extra = rt.schemas if rt.schemas else []
-    if extra:
-        out.extend(extra)
-    return out or None
+    schemas = rt.schemas if rt.schemas else []
+    return schemas if schemas else None
+
+
+def _is_sequential_attack_chain(sess: dict[str, Any] | None) -> bool:
+    if not sess:
+        return False
+    ac = sess.get("attack_chain")
+    return isinstance(ac, dict) and bool(ac.get("sequential"))
+
+
+async def resolve_attack_chain_follow_schemas(
+    settings: Settings,
+    db: AsyncIOMotorDatabase,
+    *,
+    organization_id: ObjectId,
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+    legacy_pruned: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]] | None, frozenset[str] | None]:
+    """Rebuild follow-up schemas from session plan; returns (schemas, batch_only)."""
+    if not _is_sequential_attack_chain(sess):
+        return legacy_pruned, None
+    batch_only = attack_chain_next_tool_only(sess, rows)
+    if not batch_only:
+        return None, None
+    schemas = await fetch_attack_chain_tool_schemas(
+        settings,
+        db,
+        organization_id=organization_id,
+        next_tool_names=batch_only,
+    )
+    offered = [
+        str((s.get("function") or {}).get("name") or s.get("name") or "").strip()
+        for s in (schemas or [])
+        if isinstance(s, dict)
+    ]
+    logger.info(
+        attack_chain_followup_log_line(
+            sess,
+            rows,
+            schemas_offered=offered,
+            batch_only=batch_only,
+        )
+    )
+    return schemas, batch_only
 
 
 _TARGET_HINT_RE = re.compile(r"https?://\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b")
@@ -2909,6 +2964,21 @@ async def execute_tool_slots_follow_up(
     sequential_tool_execution = await _session_attack_chain_sequential(
         db, organization_id, user_id, session_id
     )
+    chain_step_at_start: int | None = None
+    sess_chain = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if _is_sequential_attack_chain(sess_chain):
+        rows_start = await list_messages(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        chain_step_at_start = attack_chain_next_step_index(sess_chain or {}, rows_start)
 
     batch_filter = (
         {
@@ -3203,6 +3273,19 @@ async def execute_tool_slots_follow_up(
             use_ai=False,
         )
 
+    if chain_step_at_start is not None and completed_results:
+        successful = [
+            s
+            for s in updated_slots
+            if str(s.get("execution_outcome") or "").lower() in ("completed", "done", "success")
+        ]
+        if successful:
+            await advance_attack_chain_step(
+                db,
+                session_id,
+                completed_step_index=chain_step_at_start,
+            )
+
     # Strip ALL tools that just ran/were-rejected from follow-up schemas + nudge to summarize.
     ran_tool_names_lower = {
         str(s.get("tool_name") or "").strip().lower()
@@ -3302,16 +3385,18 @@ async def execute_tool_slots_follow_up(
                     msg["content"] = content + ac_suffix
                     break
     await inject_followup_skills(settings, follow_llm, routing)
+    follow_schemas = pruned_batch_follow_schemas
     if isinstance(sess_ac, dict):
-        follow_schemas = await _augment_follow_schemas_for_attack_chain(
+        follow_schemas, resolved_only = await resolve_attack_chain_follow_schemas(
             settings,
             db,
-            organization_id,
-            follow_batch_only,
-            pruned_batch_follow_schemas,
+            organization_id=organization_id,
+            sess=sess_ac,
+            rows=fresh_rows,
+            legacy_pruned=pruned_batch_follow_schemas,
         )
-    else:
-        follow_schemas = pruned_batch_follow_schemas
+        if resolved_only is not None:
+            follow_batch_only = resolved_only
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -3350,6 +3435,22 @@ async def _auto_execute_single_tool_sse(
         yield "data: [ERROR] Tenant administrator role required for automatic tool execution\n\n"
         yield "data: [DONE]\n\n"
         return
+
+    chain_step_idx: int | None = None
+    sess_pre = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if _is_sequential_attack_chain(sess_pre):
+        pre_rows = await list_messages(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        chain_step_idx = attack_chain_next_step_index(sess_pre or {}, pre_rows)
 
     from app.services.organization_tools import get_disabled_tool_names
 
@@ -3440,6 +3541,12 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         use_ai=False,
     )
+    if chain_step_idx is not None:
+        await advance_attack_chain_step(
+            db,
+            session_id,
+            completed_step_index=chain_step_idx,
+        )
 
     # Strip the just-executed tool from follow-up schemas + nudge model to summarize.
     ran_tool_lower = tool_name.strip().lower()
@@ -3490,6 +3597,7 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
     )
     follow_batch_only: frozenset[str] | None = None
+    follow_schemas = pruned_follow_schemas
     if isinstance(sess_ac, dict):
         fresh_rows = await list_messages(
             db,
@@ -3502,13 +3610,16 @@ async def _auto_execute_single_tool_sse(
             follow_msgs.insert(0, ac_msg)
         if ac_suffix:
             summarize_system["content"] = summarize_system["content"] + ac_suffix
-        pruned_follow_schemas = await _augment_follow_schemas_for_attack_chain(
+        follow_schemas, resolved_only = await resolve_attack_chain_follow_schemas(
             settings,
             db,
-            organization_id,
-            follow_batch_only,
-            pruned_follow_schemas,
+            organization_id=organization_id,
+            sess=sess_ac,
+            rows=fresh_rows,
+            legacy_pruned=pruned_follow_schemas,
         )
+        if resolved_only is not None:
+            follow_batch_only = resolved_only
     async for chunk in stream_follow_up_after_tool(
         settings,
         db,
@@ -3517,7 +3628,7 @@ async def _auto_execute_single_tool_sse(
         session_id=session_id,
         llm_messages=follow_msgs,
         carry_thinking=carry_thinking,
-        tool_schemas=pruned_follow_schemas,
+        tool_schemas=follow_schemas,
         tenant_roles=roles_l,
         auto_accept_tools=auto_accept_tools,
         batch_only_tool_names=follow_batch_only,
@@ -3608,6 +3719,8 @@ async def stream_follow_up_after_tool(
     body: dict[str, Any] = {"messages": llm_messages}
     if tool_schemas:
         body["schemas"] = tool_schemas
+    if batch_only_tool_names:
+        body["attack_chain_force_next_tool"] = True
     # Build a set of (tool_name, args_json) for tool results already in the snapshot — these
     # already ran in this turn chain. If the follow-up LLM tries to re-call any of them with
     # identical args, drop the call to break the loop instead of re-launching the tool.

@@ -45,7 +45,7 @@ import { ApiError } from "@/lib/api";
 
 function attackChainUiFromSessionDoc(
   ac: Record<string, unknown> | null | undefined,
-): { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>> } | null {
+): { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>>; currentStep: number } | null {
   if (!ac || !ac.sequential) return null;
   const steps = ac.steps;
   if (!Array.isArray(steps) || steps.length === 0) return null;
@@ -53,9 +53,12 @@ function attackChainUiFromSessionDoc(
   const phases = Array.isArray(phasesRaw)
     ? (phasesRaw as AttackChainPhase[])
     : [];
+  const rawStep = ac.current_step;
+  const currentStep = typeof rawStep === "number" && rawStep >= 0 ? rawStep : 0;
   return {
     phases,
     steps: steps as Array<Record<string, unknown>>,
+    currentStep,
   };
 }
 
@@ -692,7 +695,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [attackChainStarting, setAttackChainStarting] = useState(false);
   const [attackChainModalError, setAttackChainModalError] = useState<string | null>(null);
   const [sessionAttackChains, setSessionAttackChains] = useState<
-    Record<string, { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>> }>
+    Record<string, { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>>; currentStep: number }>
   >({});
   const [followupPreview, setFollowupPreview] = useState<AttackChainFollowupPreview | null>(null);
   const [followupLoading, setFollowupLoading] = useState(false);
@@ -982,7 +985,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     if (!ui) return;
     setSessionAttackChains((prev) => {
       const cur = prev[selectedSessionId];
-      if (cur && cur.steps.length === ui.steps.length) return prev;
+      if (
+        cur &&
+        cur.steps.length === ui.steps.length &&
+        cur.currentStep === ui.currentStep
+      ) {
+        return prev;
+      }
       return { ...prev, [selectedSessionId]: ui };
     });
   }, [selectedSessionId, sessions]);
@@ -1341,6 +1350,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
             [sessionId!]: {
               phases: attackChainUi.phases,
               steps: attackChainUi.steps,
+              currentStep: 0,
             },
           }));
           delete followupGenKeyRef.current[sessionId!];
@@ -1517,6 +1527,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           [selectedSessionId]: {
             phases,
             steps: ac.steps as Array<Record<string, unknown>>,
+            currentStep:
+              typeof ac.current_step === "number" && ac.current_step >= 0
+                ? ac.current_step
+                : prev[selectedSessionId]?.currentStep ?? 0,
           },
         }));
       }
@@ -1674,7 +1688,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     if (!meta?.steps.length) return;
     const genKey = `${selectedSessionId}:${meta.steps.length}`;
     if (followupDismissedKeys.has(genKey)) return;
-    if (!isAttackChainComplete(meta.steps, currentMessages)) return;
+    if (!isAttackChainComplete(meta.steps, currentMessages, meta.currentStep)) return;
     if (agentActivelyWorking) return;
 
     if (followupGenKeyRef.current[selectedSessionId] === genKey && followupPreview) return;
@@ -2507,6 +2521,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                       phases={sessionAttackChains[selectedSessionId].phases}
                       steps={sessionAttackChains[selectedSessionId].steps}
                       messages={currentMessages}
+                      currentStep={sessionAttackChains[selectedSessionId].currentStep}
                     />
                   </div>
                 ) : null}

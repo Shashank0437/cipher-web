@@ -7,6 +7,8 @@ type AttackChainPhaseStripProps = {
   phases: AttackChainPhase[];
   steps: Array<Record<string, unknown>>;
   messages: AgentChatMessage[];
+  /** Server-driven step index (0 = first tool pending). Preferred over tool-name inference. */
+  currentStep?: number | null;
 };
 
 function completedToolsFromMessages(messages: AgentChatMessage[]): Set<string> {
@@ -29,6 +31,35 @@ function completedToolsFromMessages(messages: AgentChatMessage[]): Set<string> {
     }
   }
   return completed;
+}
+
+function activeToolFromStepIndex(
+  steps: Array<Record<string, unknown>>,
+  currentStep: number | undefined | null,
+  completed: Set<string>,
+): string | null {
+  if (typeof currentStep === "number" && currentStep >= 0 && currentStep < steps.length) {
+    const tn = String(steps[currentStep].tool ?? "").trim().toLowerCase();
+    if (tn) return tn;
+  }
+  for (const step of steps) {
+    const tn = String(step.tool ?? "").trim().toLowerCase();
+    if (tn && !completed.has(tn)) return tn;
+  }
+  return null;
+}
+
+function phaseStatusByIndex(
+  phase: AttackChainPhase,
+  currentStep: number,
+): "done" | "active" | "pending" {
+  const indices = phase.step_indices ?? [];
+  if (!indices.length) return "pending";
+  const maxIdx = Math.max(...indices);
+  const minIdx = Math.min(...indices);
+  if (maxIdx < currentStep) return "done";
+  if (minIdx <= currentStep && currentStep <= maxIdx) return "active";
+  return "pending";
 }
 
 function phaseStatus(
@@ -62,8 +93,10 @@ function phaseStatus(
 export function isAttackChainComplete(
   steps: Array<Record<string, unknown>>,
   messages: AgentChatMessage[],
+  currentStep?: number | null,
 ): boolean {
   if (!steps.length) return false;
+  if (typeof currentStep === "number" && currentStep >= steps.length) return true;
   const completed = completedToolsFromMessages(messages);
   for (const step of steps) {
     const tn = String(step.tool ?? "").trim().toLowerCase();
@@ -72,18 +105,19 @@ export function isAttackChainComplete(
   return true;
 }
 
-export function AttackChainPhaseStrip({ phases, steps, messages }: AttackChainPhaseStripProps) {
+export function AttackChainPhaseStrip({
+  phases,
+  steps,
+  messages,
+  currentStep,
+}: AttackChainPhaseStripProps) {
   if (!phases.length) return null;
 
   const completed = completedToolsFromMessages(messages);
-  let activeTool: string | null = null;
-  for (const step of steps) {
-    const tn = String(step.tool ?? "").trim().toLowerCase();
-    if (tn && !completed.has(tn)) {
-      activeTool = tn;
-      break;
-    }
-  }
+  const stepIndex =
+    typeof currentStep === "number" && currentStep >= 0 ? currentStep : completed.size;
+  const activeTool = activeToolFromStepIndex(steps, currentStep, completed);
+  const useIndexDriver = typeof currentStep === "number";
 
   return (
     <div
@@ -96,7 +130,9 @@ export function AttackChainPhaseStrip({ phases, steps, messages }: AttackChainPh
       </p>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px]">
         {phases.map((phase, idx) => {
-          const status = phaseStatus(phase, steps, completed, activeTool);
+          const status = useIndexDriver
+            ? phaseStatusByIndex(phase, stepIndex)
+            : phaseStatus(phase, steps, completed, activeTool);
           const label = phase.label || phase.phase;
           const symbol = status === "done" ? "✓" : status === "active" ? "●" : "○";
           return (
