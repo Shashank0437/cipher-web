@@ -32,8 +32,10 @@ import {
   listAttackChainPlans,
   type AttackChainPlanPreview,
   type AttackChainPlan,
+  type AttackChainPhase,
 } from "@/lib/agentAttackChains";
 import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModal";
+import { AttackChainPhaseStrip } from "@/components/dashboard/AttackChainPhaseStrip";
 import { ApiError } from "@/lib/api";
 
 const ATTACK_CHAIN_ICONS: Record<string, string> = {
@@ -676,6 +678,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   const [attackChainModalOpen, setAttackChainModalOpen] = useState(false);
   const [attackChainStarting, setAttackChainStarting] = useState(false);
   const [attackChainModalError, setAttackChainModalError] = useState<string | null>(null);
+  const [sessionAttackChains, setSessionAttackChains] = useState<
+    Record<string, { phases: AttackChainPhase[]; steps: Array<Record<string, unknown>> }>
+  >({});
   const [toolPickerOpen, setToolPickerOpen] = useState(false);
   const [orgToolsRows, setOrgToolsRows] = useState<{ name: string; description: string }[]>([]);
   const [orgToolsLoading, setOrgToolsLoading] = useState(false);
@@ -1274,6 +1279,14 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
         planId?: string;
         objective?: string;
         operatorNote?: string;
+        executiveSummary?: string;
+        paths?: string[];
+        phases?: AttackChainPhase[];
+        plannerSource?: string;
+      },
+      attackChainUi?: {
+        phases: AttackChainPhase[];
+        steps: Array<Record<string, unknown>>;
       },
     ) => {
       const trimmed = text.trim();
@@ -1291,6 +1304,16 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           sessionId = s.id;
           setSessions((prev) => [s, ...prev]);
           setSelectedSessionId(s.id);
+        }
+
+        if (attackChainUi?.phases?.length && attackChainUi.steps?.length && sessionId) {
+          setSessionAttackChains((prev) => ({
+            ...prev,
+            [sessionId!]: {
+              phases: attackChainUi.phases,
+              steps: attackChainUi.steps,
+            },
+          }));
         }
 
         setPrompt("");
@@ -1321,6 +1344,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           attackChainPlanId: attackChainMeta?.planId,
           attackChainObjective: attackChainMeta?.objective,
           attackChainOperatorNote: attackChainMeta?.operatorNote,
+          attackChainExecutiveSummary: attackChainMeta?.executiveSummary,
+          attackChainPaths: attackChainMeta?.paths,
+          attackChainPhases: attackChainMeta?.phases,
+          attackChainPlannerSource: attackChainMeta?.plannerSource,
           onEvent: attachStreamHandlers(sessionId),
         });
       } catch (e) {
@@ -1406,6 +1433,13 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           planId: preview.plan_id || attackChainModalPlan.id,
           objective: preview.objective ?? "comprehensive",
           operatorNote: note,
+          executiveSummary: preview.executive_summary ?? undefined,
+          paths: preview.attack_paths ?? undefined,
+          phases: preview.attack_phases ?? undefined,
+          plannerSource: preview.planner_source ?? undefined,
+        }, {
+          phases: preview.attack_phases ?? [],
+          steps: preview.steps,
         });
       } catch (err) {
         setAttackChainModalError(formatChatError(err));
@@ -2344,6 +2378,15 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                 {agentActivelyWorking ? (
                   <div className="mx-auto mb-2 w-[min(100%,60%)] min-w-0">
                     <AgentWorkingComposerStrip />
+                  </div>
+                ) : null}
+                {selectedSessionId && sessionAttackChains[selectedSessionId] ? (
+                  <div className="mx-auto mb-2 w-[min(100%,60%)] min-w-0">
+                    <AttackChainPhaseStrip
+                      phases={sessionAttackChains[selectedSessionId].phases}
+                      steps={sessionAttackChains[selectedSessionId].steps}
+                      messages={currentMessages}
+                    />
                   </div>
                 ) : null}
                 <div className="mx-auto w-[min(100%,60%)] min-w-0">

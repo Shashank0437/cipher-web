@@ -29,6 +29,20 @@ function fmtPercent(n?: number | null) {
   return typeof n === "number" ? `${Math.round(n * 100)}%` : "n/a";
 }
 
+function plannerBadgeLabel(source?: string | null) {
+  if (source === "llm_hybrid") return "AI-planned";
+  if (source === "heuristic") return "Heuristic fallback";
+  return null;
+}
+
+function phaseForStep(phases: AttackChainPlanPreview["attack_phases"], idx: number): string | null {
+  if (!phases?.length) return null;
+  for (const ph of phases) {
+    if (ph.step_indices?.includes(idx)) return ph.label || ph.phase;
+  }
+  return null;
+}
+
 export function AttackChainPlanModal({
   plan,
   open,
@@ -225,7 +239,38 @@ export function AttackChainPlanModal({
 
           {isIntelligent && preview?.success ? (
             <div className="rounded-xl border border-primary/25 bg-primary-container/25 p-4 space-y-3">
-              <p className="text-[13px] font-bold text-on-surface">Preview — review before starting</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[13px] font-bold text-on-surface">Preview — review before starting</p>
+                {plannerBadgeLabel(preview.planner_source) ? (
+                  <span
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                      preview.planner_source === "llm_hybrid"
+                        ? "bg-primary/15 text-primary"
+                        : "bg-surface-container-high text-on-surface-variant"
+                    }`}
+                  >
+                    {plannerBadgeLabel(preview.planner_source)}
+                  </span>
+                ) : null}
+              </div>
+              {preview.executive_summary ? (
+                <p className="text-[13px] leading-relaxed text-on-surface">{preview.executive_summary}</p>
+              ) : null}
+              {preview.attack_paths?.length ? (
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-on-surface-variant/80">
+                    Likely attack paths
+                  </p>
+                  <ul className="mt-1 space-y-1 text-[13px] text-on-surface-variant">
+                    {preview.attack_paths.map((path) => (
+                      <li key={path} className="flex gap-2">
+                        <span aria-hidden>•</span>
+                        <span>{path}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="grid gap-1 text-[13px] text-on-surface-variant sm:grid-cols-2">
                 <p><span className="font-semibold text-on-surface">Objective:</span> {preview.objective ?? precision}</p>
                 <p><span className="font-semibold text-on-surface">Steps:</span> {preview.steps.length}</p>
@@ -236,27 +281,73 @@ export function AttackChainPlanModal({
                   <p><span className="font-semibold text-on-surface">Target type:</span> {preview.target_type}</p>
                 ) : null}
               </div>
-              <ol className="space-y-2 text-[13px]">
-                {preview.steps.map((step, idx) => {
-                  const tool = String(step.tool ?? "");
-                  const reason = stepSelectionReason(step);
-                  return (
-                    <li key={`${tool}-${idx}`} className="rounded-lg border border-outline-variant/50 bg-surface-container-lowest/80 px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono font-semibold text-on-surface">{idx + 1}. {tool}</span>
-                        {reason?.effective_score != null ? (
-                          <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 text-[11px] text-on-surface-variant">
-                            {fmtPercent(reason.effective_score)} match
-                          </span>
+              {preview.attack_phases?.length ? (
+                <div className="space-y-3">
+                  {preview.attack_phases.map((ph) => (
+                    <div key={`${ph.phase}-${ph.label}`}>
+                      <p className="text-[12px] font-bold uppercase tracking-wide text-primary">{ph.label}</p>
+                      <ol className="mt-1.5 space-y-2 text-[13px]">
+                        {(ph.step_indices ?? []).map((stepIdx) => {
+                          const step = preview.steps[stepIdx];
+                          if (!step) return null;
+                          const tool = String(step.tool ?? "");
+                          const reason = stepSelectionReason(step);
+                          return (
+                            <li
+                              key={`${ph.phase}-${stepIdx}`}
+                              className="rounded-lg border border-outline-variant/50 bg-surface-container-lowest/80 px-3 py-2"
+                            >
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono font-semibold text-on-surface">
+                                  {stepIdx + 1}. {tool}
+                                </span>
+                                {reason?.effective_score != null ? (
+                                  <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 text-[11px] text-on-surface-variant">
+                                    {fmtPercent(reason.effective_score)} match
+                                  </span>
+                                ) : null}
+                              </div>
+                              {reason?.summary ? (
+                                <p className="mt-1 text-[12px] leading-snug text-on-surface-variant">{reason.summary}</p>
+                              ) : step.expected_outcome ? (
+                                <p className="mt-1 text-[12px] leading-snug text-on-surface-variant">
+                                  {String(step.expected_outcome)}
+                                </p>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <ol className="space-y-2 text-[13px]">
+                  {preview.steps.map((step, idx) => {
+                    const tool = String(step.tool ?? "");
+                    const reason = stepSelectionReason(step);
+                    const phaseLabel = phaseForStep(preview.attack_phases, idx);
+                    return (
+                      <li key={`${tool}-${idx}`} className="rounded-lg border border-outline-variant/50 bg-surface-container-lowest/80 px-3 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-semibold text-on-surface">{idx + 1}. {tool}</span>
+                          {phaseLabel ? (
+                            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary">{phaseLabel}</span>
+                          ) : null}
+                          {reason?.effective_score != null ? (
+                            <span className="rounded-md bg-surface-container-high px-1.5 py-0.5 text-[11px] text-on-surface-variant">
+                              {fmtPercent(reason.effective_score)} match
+                            </span>
+                          ) : null}
+                        </div>
+                        {reason?.summary ? (
+                          <p className="mt-1 text-[12px] leading-snug text-on-surface-variant">{reason.summary}</p>
                         ) : null}
-                      </div>
-                      {reason?.summary ? (
-                        <p className="mt-1 text-[12px] leading-snug text-on-surface-variant">{reason.summary}</p>
-                      ) : null}
-                    </li>
-                  );
-                })}
-              </ol>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
             </div>
           ) : null}
 

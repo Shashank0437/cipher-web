@@ -84,6 +84,8 @@ from app.services.agent_client import (
 )
 from app.services.agent_attack_chains import (
     INTELLIGENT_ATTACK_CHAIN_ID,
+    attack_chain_execution_hint,
+    attack_chain_next_tool_only,
     attack_chain_system_note,
     list_attack_chain_plans,
     preview_attack_chain_plan,
@@ -553,6 +555,10 @@ async def post_message_stream(
     attack_chain_steps: list[dict[str, Any]] = [
         s for s in body.attack_chain_steps if isinstance(s, dict)
     ]
+    attack_chain_paths_body = [str(p).strip() for p in body.attack_chain_paths if str(p).strip()]
+    attack_chain_phases_body = [p for p in body.attack_chain_phases if isinstance(p, dict)]
+    attack_chain_planner_src_body = body.attack_chain_planner_source.strip()
+    attack_chain_exec_summary_body = body.attack_chain_executive_summary.strip()
     if attack_chain_steps:
         chain_meta: dict[str, Any] = {
             "sequential": True,
@@ -567,6 +573,15 @@ async def post_message_stream(
         op_note = body.attack_chain_operator_note.strip()
         if op_note:
             chain_meta["operator_note"] = op_note
+        exec_summary = attack_chain_exec_summary_body
+        if exec_summary:
+            chain_meta["executive_summary"] = exec_summary
+        if attack_chain_paths_body:
+            chain_meta["attack_paths"] = attack_chain_paths_body[:8]
+        if attack_chain_phases_body:
+            chain_meta["phases"] = attack_chain_phases_body[:16]
+        if attack_chain_planner_src_body:
+            chain_meta["planner_source"] = attack_chain_planner_src_body
         await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
             {"_id": sid},
             {
@@ -630,6 +645,14 @@ async def post_message_stream(
                 extra_system_parts.append(ctx_snip)
             if retry_rejected:
                 extra_system_parts.append(retry_rejected_tools_system_note(retry_rejected))
+            ac_sess = (sess_fresh or {}).get("attack_chain")
+            if isinstance(ac_sess, dict) and ac_sess.get("sequential"):
+                hint = attack_chain_execution_hint(sess_fresh or {}, rows)
+                if hint:
+                    extra_system_parts.append(hint)
+                next_only = attack_chain_next_tool_only(sess_fresh or {}, rows)
+                if next_only and batch_only is None:
+                    batch_only = next_only
             if attack_chain_steps:
                 intelligent = body.attack_chain_plan_id.strip() == INTELLIGENT_ATTACK_CHAIN_ID
                 extra_system_parts.append(
@@ -638,6 +661,10 @@ async def post_message_stream(
                         intelligent=intelligent,
                         objective=body.attack_chain_objective.strip() or None,
                         operator_note=body.attack_chain_operator_note.strip() or None,
+                        executive_summary=attack_chain_exec_summary_body or None,
+                        attack_paths=attack_chain_paths_body or None,
+                        phases=attack_chain_phases_body or None,
+                        planner_source=attack_chain_planner_src_body or None,
                     )
                 )
             llm_messages = build_llm_messages_from_history(

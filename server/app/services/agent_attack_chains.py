@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.config import Settings
@@ -126,19 +127,40 @@ def _tool_names_from_steps(steps: list[Any]) -> list[str]:
     return out
 
 
+def _phase_label_for_step_index(phases: list[dict[str, Any]], step_index: int) -> str | None:
+    for ph in phases:
+        if not isinstance(ph, dict):
+            continue
+        indices = ph.get("step_indices")
+        if isinstance(indices, list) and step_index in indices:
+            return str(ph.get("label") or ph.get("phase") or "").strip() or None
+    return None
+
+
 def attack_chain_system_note(
     steps: list[dict[str, Any]],
     *,
     intelligent: bool = False,
     objective: str | None = None,
     operator_note: str | None = None,
+    executive_summary: str | None = None,
+    attack_paths: list[str] | None = None,
+    phases: list[dict[str, Any]] | None = None,
+    planner_source: str | None = None,
 ) -> str:
     """LLM instruction mirroring NyxStrike session workflow_steps order."""
     lines: list[str] = []
     if intelligent:
         obj = (objective or "comprehensive").strip()
+        source = (planner_source or "").strip()
+        source_note = ""
+        if source == "llm_hybrid":
+            source_note = " (AI-planned hybrid planner)"
+        elif source == "heuristic":
+            source_note = " (heuristic fallback planner)"
         lines.append(
-            "Intelligent attack chain (AI target profiling + planner). "
+            "Intelligent attack chain (AI target profiling + planner)"
+            f"{source_note}. "
             f"Precision objective: {obj}. "
             "Execute tools strictly in the planned order below — one tool call per assistant turn."
         )
@@ -146,6 +168,37 @@ def attack_chain_system_note(
         lines.append(
             "Attack chain pipeline — run tools strictly in this order (one tool call per assistant turn):"
         )
+
+    summary = (executive_summary or "").strip()
+    if summary:
+        lines.append(f"Executive summary: {summary}")
+
+    paths = [p.strip() for p in (attack_paths or []) if str(p).strip()]
+    if paths:
+        lines.append("Likely attack paths:")
+        for p in paths[:3]:
+            lines.append(f"- {p}")
+
+    phase_list = phases if isinstance(phases, list) else []
+    if phase_list:
+        lines.append("Phased plan:")
+        for ph in phase_list:
+            if not isinstance(ph, dict):
+                continue
+            label = str(ph.get("label") or ph.get("phase") or "Phase").strip()
+            indices = ph.get("step_indices")
+            if isinstance(indices, list) and indices:
+                tool_names = []
+                for idx in indices:
+                    if isinstance(idx, int) and 0 <= idx < len(steps):
+                        step = steps[idx]
+                        if isinstance(step, dict):
+                            tn = str(step.get("tool") or "").strip()
+                            if tn:
+                                tool_names.append(tn)
+                if tool_names:
+                    lines.append(f"- {label}: {', '.join(tool_names)}")
+
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
@@ -155,7 +208,10 @@ def attack_chain_system_note(
         deps = step.get("dependencies")
         dep_list = [str(d) for d in deps] if isinstance(deps, list) else []
         dep_suffix = f" (after {', '.join(dep_list)})" if dep_list else ""
-        lines.append(f"{i + 1}. {tool}{dep_suffix}")
+        phase_label = _phase_label_for_step_index(phase_list, i)
+        phase_prefix = f"[{phase_label}] " if phase_label else ""
+        lines.append(f"{i + 1}. {phase_prefix}{tool}{dep_suffix}")
+
     lines.append(
         "Do not batch multiple tools in one response. Call exactly one tool, wait for its result, then continue."
     )
@@ -176,6 +232,19 @@ def _parse_intelligent_preview(raw: dict[str, Any], target: str, objective: str)
     if profile:
         target_type = str(profile.get("target_type") or profile.get("type") or "") or None
 
+    executive_summary = str(raw.get("executive_summary") or "").strip() or None
+    attack_paths_raw = raw.get("attack_paths")
+    attack_paths: list[str] = []
+    if isinstance(attack_paths_raw, list):
+        attack_paths = [str(p).strip() for p in attack_paths_raw if str(p).strip()]
+
+    attack_phases_raw = raw.get("attack_phases")
+    attack_phases: list[dict[str, Any]] = []
+    if isinstance(attack_phases_raw, list):
+        attack_phases = [p for p in attack_phases_raw if isinstance(p, dict)]
+
+    planner_source = str(raw.get("planner_source") or "").strip() or None
+
     return {
         "success": True,
         "plan_id": INTELLIGENT_ATTACK_CHAIN_ID,
@@ -189,7 +258,98 @@ def _parse_intelligent_preview(raw: dict[str, Any], target: str, objective: str)
         "estimated_time": int(attack_chain.get("estimated_time") or 0),
         "success_probability": float(attack_chain.get("success_probability") or 0),
         "target_profile": profile,
+        "executive_summary": executive_summary,
+        "attack_paths": attack_paths,
+        "attack_phases": attack_phases,
+        "planner_source": planner_source,
     }
+
+
+def _completed_tools_from_rows(rows: list[dict[str, Any]], *, tail: int = 48) -> set[str]:
+    completed: set[str] = set()
+    for m in rows[-tail:]:
+        slots = m.get("tool_calls")
+        if isinstance(slots, list):
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    continue
+                tn = str(slot.get("tool_name") or "").strip().lower()
+                if not tn:
+                    continue
+                eo = str(slot.get("execution_outcome") or "").lower()
+                hd = str(slot.get("human_decision") or "").lower()
+                if eo in ("done", "completed", "success") and hd != "reject":
+                    completed.add(tn)
+        content = str(m.get("content") or "")
+        if m.get("role") == "tool" and m.get("tool_name"):
+            completed.add(str(m.get("tool_name")).strip().lower())
+        if "[Executed **" in content:
+            for match in re.finditer(r"\[Executed \*\*([^*]+)\*\*", content):
+                completed.add(match.group(1).strip().lower())
+    return completed
+
+
+def attack_chain_next_tool_only(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> frozenset[str] | None:
+    """Return frozenset of the next planned tool name for sequential attack-chain sessions."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return None
+    steps = ac.get("steps")
+    if not isinstance(steps, list):
+        return None
+    completed = _completed_tools_from_rows(rows)
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        tn = str(step.get("tool") or step.get("name") or "").strip().lower()
+        if tn and tn not in completed:
+            return frozenset({tn})
+    return None
+
+
+def attack_chain_execution_hint(
+    sess: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> str | None:
+    """Phase-aware hint for the next planned tool in an attack-chain session."""
+    ac = sess.get("attack_chain")
+    if not isinstance(ac, dict) or not ac.get("sequential"):
+        return None
+    steps = ac.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+
+    phases = ac.get("phases")
+    phase_list = phases if isinstance(phases, list) else []
+    completed = _completed_tools_from_rows(rows)
+
+    next_idx: int | None = None
+    next_tool: str | None = None
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tn = str(step.get("tool") or step.get("name") or "").strip()
+        if tn and tn.lower() not in completed:
+            next_idx = i
+            next_tool = tn
+            break
+
+    if not next_tool:
+        return "Attack chain plan: all planned tools have completed. Summarize findings; do not re-run completed tools."
+
+    phase_label = _phase_label_for_step_index(phase_list, next_idx or 0)
+    total = len([s for s in steps if isinstance(s, dict) and str(s.get("tool") or "").strip()])
+    done = len(completed)
+    phase_part = f"Current phase: {phase_label}. " if phase_label else ""
+    return (
+        f"Attack chain progress: {done}/{total} tools completed. "
+        f"{phase_part}"
+        f"Next planned step ({next_idx + 1}/{total}): `{next_tool}`. "
+        "Call only this tool now — do not batch or skip ahead."
+    )
 
 
 async def preview_attack_chain_plan(
@@ -210,7 +370,11 @@ async def preview_attack_chain_plan(
         objective_key = "comprehensive"
 
     if plan_id == INTELLIGENT_ATTACK_CHAIN_ID:
-        payload: dict[str, Any] = {"target": target.strip(), "objective": objective_key}
+        payload: dict[str, Any] = {
+            "target": target.strip(),
+            "objective": objective_key,
+            "use_llm_planner": True,
+        }
         note = operator_note.strip()
         if note:
             payload["runtime_context"] = {"operator_note": note}

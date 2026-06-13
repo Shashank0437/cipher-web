@@ -106,6 +106,10 @@ class AgentChatSendBody(BaseModel):
     attack_chain_plan_id: str = Field(default="", max_length=64)
     attack_chain_objective: str = Field(default="", max_length=32)
     attack_chain_operator_note: str = Field(default="", max_length=4000)
+    attack_chain_executive_summary: str = Field(default="", max_length=8000)
+    attack_chain_paths: list[str] = Field(default_factory=list, max_length=8)
+    attack_chain_phases: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    attack_chain_planner_source: str = Field(default="", max_length=32)
 
 
 class AgentChatToolConfirmBody(BaseModel):
@@ -148,4 +152,8 @@ class AttackChainPlanPreviewOut(BaseModel):
     estimated_time: int | None = None
     success_probability: float | None = None
     target_profile: dict[str, Any] | None = None
+    executive_summary: str | None = None
+    attack_paths: list[str] = Field(default_factory=list)
+    attack_phases: list[dict[str, Any]] = Field(default_factory=list)
+    planner_source: str | None = None
     error: str | None = None

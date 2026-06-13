@@ -37,6 +37,7 @@ from app.services.agent_client import (
 from app.services.session_intelligence import recalculate_session_intelligence
 from app.services.tool_run_stream import drain_tool_run_stream
 from app.services.agent_skills import fetch_skill_blocks_for_meta, inject_followup_skills
+from app.services.agent_attack_chains import attack_chain_execution_hint, attack_chain_next_tool_only
 
 logger = logging.getLogger(__name__)
 
@@ -3236,6 +3237,24 @@ async def execute_tool_slots_follow_up(
         + batch_assistant_turn
         + tool_result_messages
     )
+    follow_batch_only: frozenset[str] | None = None
+    sess_ac = await get_session_owned(
+        db,
+        organization_id=organization_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if isinstance(sess_ac, dict):
+        fresh_rows = await list_messages(
+            db,
+            organization_id=organization_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        ac_hint = attack_chain_execution_hint(sess_ac, fresh_rows)
+        if ac_hint:
+            follow_llm.insert(0, {"role": "system", "content": ac_hint})
+        follow_batch_only = attack_chain_next_tool_only(sess_ac, fresh_rows)
     await inject_followup_skills(settings, follow_llm, routing)
     async for chunk in stream_follow_up_after_tool(
         settings,
@@ -3248,6 +3267,7 @@ async def execute_tool_slots_follow_up(
         tool_schemas=pruned_batch_follow_schemas,
         tenant_roles=tenant_roles,
         auto_accept_tools=auto_accept_tools,
+        batch_only_tool_names=follow_batch_only,
         batch_exclude_tool_names=frozenset(ran_tool_names_lower) if ran_tool_names_lower else None,
     ):
         yield chunk

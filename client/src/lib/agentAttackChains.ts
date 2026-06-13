@@ -24,6 +24,12 @@ export type AttackChainStepReason = {
   covers_required?: string[];
 };
 
+export type AttackChainPhase = {
+  phase: string;
+  label: string;
+  step_indices: number[];
+};
+
 export type AttackChainPlanPreview = {
   success: boolean;
   plan_id: string;
@@ -37,6 +43,10 @@ export type AttackChainPlanPreview = {
   estimated_time?: number | null;
   success_probability?: number | null;
   target_profile?: Record<string, unknown> | null;
+  executive_summary?: string | null;
+  attack_paths?: string[];
+  attack_phases?: AttackChainPhase[];
+  planner_source?: string | null;
   error?: string | null;
 };
 
