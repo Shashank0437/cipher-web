@@ -30,13 +30,14 @@ import {
 import {
   buildAttackChainPrompt,
   listAttackChainPlans,
-  previewAttackChainPlan,
+  type AttackChainPlanPreview,
   type AttackChainPlan,
 } from "@/lib/agentAttackChains";
 import { AttackChainPlanModal } from "@/components/dashboard/AttackChainPlanModal";
 import { ApiError } from "@/lib/api";
 
 const ATTACK_CHAIN_ICONS: Record<string, string> = {
+  intelligent_attack_chain: "auto_awesome",
   ai_recon: "radar",
   ai_profiling: "person_search",
   ai_vuln: "bug_report",
@@ -1269,6 +1270,11 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
       text: string,
       toolNames: string[] | null,
       attackChainSteps?: Array<Record<string, unknown>> | null,
+      attackChainMeta?: {
+        planId?: string;
+        objective?: string;
+        operatorNote?: string;
+      },
     ) => {
       const trimmed = text.trim();
       if (!trimmed || isSending) return;
@@ -1312,6 +1318,9 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
           toolExecutionMode,
           explicitToolNames: toolNames,
           attackChainSteps: attackChainSteps ?? undefined,
+          attackChainPlanId: attackChainMeta?.planId,
+          attackChainObjective: attackChainMeta?.objective,
+          attackChainOperatorNote: attackChainMeta?.operatorNote,
           onEvent: attachStreamHandlers(sessionId),
         });
       } catch (e) {
@@ -1373,25 +1382,31 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
   }, []);
 
   const handleAttackChainStart = useCallback(
-    async (target: string, note: string) => {
+    async (target: string, note: string, preview: AttackChainPlanPreview) => {
       if (!attackChainModalPlan) return;
       setAttackChainStarting(true);
       setAttackChainModalError(null);
       try {
-        const preview = await previewAttackChainPlan(attackChainModalPlan.id, target);
         if (!preview.success) {
           throw new Error(preview.error ?? "Failed to build attack chain plan");
         }
+        const intelligent =
+          attackChainModalPlan.kind === "intelligent" || attackChainModalPlan.id === "intelligent_attack_chain";
         const msg = buildAttackChainPrompt(
           preview.session_name || attackChainModalPlan.title,
           preview.target || target,
           preview.tools,
           note,
+          { intelligent, objective: preview.objective ?? "comprehensive" },
         );
         setExplicitToolNames(preview.tools);
         setComposerMode("plan");
         setAttackChainModalOpen(false);
-        await executeMessage(msg, preview.tools, preview.steps);
+        await executeMessage(msg, preview.tools, preview.steps, {
+          planId: preview.plan_id || attackChainModalPlan.id,
+          objective: preview.objective ?? "comprehensive",
+          operatorNote: note,
+        });
       } catch (err) {
         setAttackChainModalError(formatChatError(err));
       } finally {

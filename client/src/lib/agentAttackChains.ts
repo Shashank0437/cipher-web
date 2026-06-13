@@ -1,6 +1,8 @@
 import { ApiError, getToken } from "@/lib/api";
 import { getApiBase } from "@/lib/env";
 
+export type AttackChainPrecision = "quick" | "comprehensive" | "stealth";
+
 export type AttackChainPlan = {
   id: string;
   title: string;
@@ -10,6 +12,16 @@ export type AttackChainPlan = {
   modal_description: string;
   tools: string[];
   placeholder: string;
+  kind?: "fixed" | "intelligent";
+};
+
+export type AttackChainStepReason = {
+  summary?: string;
+  effective_score?: number;
+  noise_score?: number;
+  objective_match?: boolean;
+  new_capabilities_added?: string[];
+  covers_required?: string[];
 };
 
 export type AttackChainPlanPreview = {
@@ -18,8 +30,13 @@ export type AttackChainPlanPreview = {
   session_name: string;
   target: string;
   target_type?: string | null;
+  objective?: string | null;
   tools: string[];
   steps: Array<Record<string, unknown>>;
+  risk_level?: string | null;
+  estimated_time?: number | null;
+  success_probability?: number | null;
+  target_profile?: Record<string, unknown> | null;
   error?: string | null;
 };
 
@@ -52,15 +69,32 @@ export async function listAttackChainPlans(): Promise<AttackChainPlan[]> {
   return data.plans ?? [];
 }
 
-export async function previewAttackChainPlan(planId: string, target: string): Promise<AttackChainPlanPreview> {
+export async function previewAttackChainPlan(
+  planId: string,
+  target: string,
+  options?: {
+    objective?: AttackChainPrecision;
+    operatorNote?: string;
+  },
+): Promise<AttackChainPlanPreview> {
   const res = await fetch(`${getApiBase()}${PREFIX}/attack-chain-plans/${encodeURIComponent(planId)}/preview`, {
     method: "POST",
     headers: bearerHeaders(true),
-    body: JSON.stringify({ target: target.trim() }),
+    body: JSON.stringify({
+      target: target.trim(),
+      objective: options?.objective ?? "comprehensive",
+      operator_note: options?.operatorNote?.trim() ?? "",
+    }),
   });
   const text = await res.text();
   if (!res.ok) throw new ApiError(detailFromResponseBody(text, res.statusText), res.status, text);
   return JSON.parse(text) as AttackChainPlanPreview;
+}
+
+export function stepSelectionReason(step: Record<string, unknown>): AttackChainStepReason | null {
+  const raw = step.selection_reason;
+  if (!raw || typeof raw !== "object") return null;
+  return raw as AttackChainStepReason;
 }
 
 export function buildAttackChainPrompt(
@@ -68,16 +102,23 @@ export function buildAttackChainPrompt(
   target: string,
   tools: string[],
   note?: string,
+  options?: { intelligent?: boolean; objective?: string },
 ): string {
   const toolList = tools.join(", ");
-  const lines = [
-    `[Attack chain: ${planTitle}]`,
-    `Execute the full pipeline on ${target}.`,
-    `Run these tools in order (respect dependencies): ${toolList}.`,
-    "Call exactly one tool per turn; wait for each result before the next step.",
-  ];
+  const lines: string[] = [];
+  if (options?.intelligent) {
+    lines.push(
+      `[Intelligent attack chain: ${planTitle}]`,
+      `Target: ${target}. Precision: ${options.objective ?? "comprehensive"}.`,
+      "Execute the AI-planned pipeline below in order.",
+    );
+  } else {
+    lines.push(`[Attack chain: ${planTitle}]`, `Execute the full pipeline on ${target}.`);
+  }
+  lines.push(`Run these tools in order (respect dependencies): ${toolList}.`);
+  lines.push("Call exactly one tool per turn; wait for each result before the next step.");
   if (note?.trim()) {
-    lines.push(`Operator note: ${note.trim()}`);
+    lines.push(`Operator custom prompt: ${note.trim()}`);
   }
   return lines.join("\n");
 }

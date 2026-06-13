@@ -562,6 +562,9 @@ export async function streamAgentChatMessage(
     toolExecutionMode?: AgentChatToolExecutionMode;
     explicitToolNames?: string[] | null;
     attackChainSteps?: Array<Record<string, unknown>> | null;
+    attackChainPlanId?: string;
+    attackChainObjective?: string;
+    attackChainOperatorNote?: string;
     onEvent?: AgentChatSseEventHandler;
     signal?: AbortSignal;
   },
@@ -572,6 +575,9 @@ export async function streamAgentChatMessage(
     tool_execution_mode?: AgentChatToolExecutionMode;
     explicit_tool_names?: string[];
     attack_chain_steps?: Array<Record<string, unknown>>;
+    attack_chain_plan_id?: string;
+    attack_chain_objective?: string;
+    attack_chain_operator_note?: string;
   } = {
     message: message.trim(),
   };
@@ -586,6 +592,15 @@ export async function streamAgentChatMessage(
   }
   if (options?.attackChainSteps?.length) {
     body.attack_chain_steps = options.attackChainSteps.slice(0, 32);
+  }
+  if (options?.attackChainPlanId?.trim()) {
+    body.attack_chain_plan_id = options.attackChainPlanId.trim();
+  }
+  if (options?.attackChainObjective?.trim()) {
+    body.attack_chain_objective = options.attackChainObjective.trim();
+  }
+  if (options?.attackChainOperatorNote?.trim()) {
+    body.attack_chain_operator_note = options.attackChainOperatorNote.trim();
   }
   await postSse(
     `${PREFIX}/sessions/${sessionId}/messages`,

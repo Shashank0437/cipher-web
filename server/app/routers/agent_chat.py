@@ -83,6 +83,7 @@ from app.services.agent_client import (
     normalize_agent_tool_path,
 )
 from app.services.agent_attack_chains import (
+    INTELLIGENT_ATTACK_CHAIN_ID,
     attack_chain_system_note,
     list_attack_chain_plans,
     preview_attack_chain_plan,
@@ -245,7 +246,13 @@ async def preview_attack_chain_plan_route(
     user: dict = Depends(require_auth_user),
 ) -> AttackChainPlanPreviewOut:
     settings = get_settings()
-    result = await preview_attack_chain_plan(settings, plan_id.strip(), body.target.strip())
+    result = await preview_attack_chain_plan(
+        settings,
+        plan_id.strip(),
+        body.target.strip(),
+        objective=body.objective,
+        operator_note=body.operator_note,
+    )
     return AttackChainPlanPreviewOut(**result)
 
 
@@ -547,14 +554,24 @@ async def post_message_stream(
         s for s in body.attack_chain_steps if isinstance(s, dict)
     ]
     if attack_chain_steps:
+        chain_meta: dict[str, Any] = {
+            "sequential": True,
+            "steps": attack_chain_steps[:32],
+        }
+        plan_id = body.attack_chain_plan_id.strip()
+        if plan_id:
+            chain_meta["plan_id"] = plan_id
+        obj = body.attack_chain_objective.strip()
+        if obj:
+            chain_meta["objective"] = obj
+        op_note = body.attack_chain_operator_note.strip()
+        if op_note:
+            chain_meta["operator_note"] = op_note
         await db[AGENT_CHAT_SESSIONS_COLLECTION].update_one(
             {"_id": sid},
             {
                 "$set": {
-                    "attack_chain": {
-                        "sequential": True,
-                        "steps": attack_chain_steps[:32],
-                    },
+                    "attack_chain": chain_meta,
                     "updated_at": _utc_now_iso(),
                 }
             },
@@ -614,7 +631,15 @@ async def post_message_stream(
             if retry_rejected:
                 extra_system_parts.append(retry_rejected_tools_system_note(retry_rejected))
             if attack_chain_steps:
-                extra_system_parts.append(attack_chain_system_note(attack_chain_steps))
+                intelligent = body.attack_chain_plan_id.strip() == INTELLIGENT_ATTACK_CHAIN_ID
+                extra_system_parts.append(
+                    attack_chain_system_note(
+                        attack_chain_steps,
+                        intelligent=intelligent,
+                        objective=body.attack_chain_objective.strip() or None,
+                        operator_note=body.attack_chain_operator_note.strip() or None,
+                    )
+                )
             llm_messages = build_llm_messages_from_history(
                 settings,
                 rows,

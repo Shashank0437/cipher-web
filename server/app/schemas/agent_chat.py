@@ -103,6 +103,9 @@ class AgentChatSendBody(BaseModel):
         max_length=32,
         description="Ordered workflow_steps from attack-chain preview; enables sequential tool execution.",
     )
+    attack_chain_plan_id: str = Field(default="", max_length=64)
+    attack_chain_objective: str = Field(default="", max_length=32)
+    attack_chain_operator_note: str = Field(default="", max_length=4000)
 
 
 class AgentChatToolConfirmBody(BaseModel):
@@ -119,6 +122,7 @@ class AttackChainPlanOut(BaseModel):
     modal_description: str
     tools: list[str]
     placeholder: str
+    kind: Literal["fixed", "intelligent"] = "fixed"
 
 
 class AttackChainPlansOut(BaseModel):
@@ -127,6 +131,8 @@ class AttackChainPlansOut(BaseModel):
 
 class AttackChainPlanPreviewBody(BaseModel):
     target: str = Field(..., min_length=1, max_length=500)
+    objective: Literal["quick", "comprehensive", "stealth"] = "comprehensive"
+    operator_note: str = Field(default="", max_length=4000)
 
 
 class AttackChainPlanPreviewOut(BaseModel):
@@ -135,6 +141,11 @@ class AttackChainPlanPreviewOut(BaseModel):
     session_name: str = ""
     target: str = ""
     target_type: str | None = None
+    objective: str | None = None
     tools: list[str] = Field(default_factory=list)
     steps: list[dict[str, Any]] = Field(default_factory=list)
+    risk_level: str | None = None
+    estimated_time: int | None = None
+    success_probability: float | None = None
+    target_profile: dict[str, Any] | None = None
     error: str | None = None
