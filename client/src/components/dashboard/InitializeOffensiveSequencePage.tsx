@@ -450,6 +450,45 @@ const ROTATING_PROMPTS = [
   "Conduct a standard web penetration test against https://example.com and summarize findings with next steps.",
 ];
 
+type QuickCard = {
+  id: string;
+  title: string;
+  description: string;
+  icon: string;
+  promptSeed: string;
+};
+
+const QUICK_CARDS: QuickCard[] = [
+  {
+    id: "recon",
+    title: "Recon my domain",
+    description: "Passive OSINT and sub-domain enumeration",
+    icon: "travel_explore",
+    promptSeed: "Run passive OSINT and subdomain enumeration on ",
+  },
+  {
+    id: "cve",
+    title: "Analyze target for CVEs",
+    description: "Version detection and vulnerability mapping",
+    icon: "shield_lock",
+    promptSeed: "Analyze the target for CVEs — version detection and vulnerability mapping for ",
+  },
+  {
+    id: "sqli",
+    title: "Craft SQLi Payload",
+    description: "Tailored bypass strings for specific DB engines",
+    icon: "code",
+    promptSeed: "Craft tailored SQL injection payloads for MySQL for ",
+  },
+  {
+    id: "network",
+    title: "Network Scan",
+    description: "Stealth port scanning and service fingerprinting",
+    icon: "radar",
+    promptSeed: "Run a stealth port scan and service fingerprinting against ",
+  },
+];
+
 type ComposerMode = "none" | "agent" | "tool" | "plan";
 
 type ClaudePromptBoxProps = {
@@ -1103,6 +1142,10 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
     );
   });
 
+
+  const onCardClick = useCallback((seed: string) => {
+    setPrompt((p) => (p.trim() ? `${p.trim()} ${seed}` : seed));
+  }, []);
 
   const handleDeleteSession = useCallback(
     async (sessionId: string, e: MouseEvent) => {
@@ -1969,7 +2012,7 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                         ? "Choose Intelligent Attack Chain or a fixed pipeline — click a card to set your target and preview the tool sequence."
                         : composerMode === "agent"
                           ? "Choose a specialist agent — configure your target and goal. The leader builds a plan and waits for your confirmation before any tools run."
-                          : "Select Agent or Plan Attack Chain below to load templates."}
+                          : "Pick a quick-start template below, or use Agent / Plan Attack Chain in the prompt bar for guided pipelines."}
                     </p>
                   </div>
 
@@ -1992,7 +2035,33 @@ export function InitializeOffensiveSequencePage({ user }: { user: AuthUser }) {
                         onSelectAgent={(agent) => openSpecialistAgentModal(agent)}
                       />
                     </div>
-                  ) : null}
+                  ) : (
+                    <div className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+                      {QUICK_CARDS.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => onCardClick(c.promptSeed)}
+                          className="group flex gap-4 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/40"
+                        >
+                          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-container/90 text-primary ring-1 ring-primary/10">
+                            <MaterialSymbol name={c.icon} className="text-2xl" filled />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-bold text-on-surface">{c.title}</p>
+                            <p className="mt-1 text-[13px] leading-snug text-on-surface-variant">{c.description}</p>
+                            <span className="mt-2 inline-flex items-center gap-1 text-[12px] font-bold text-primary">
+                              Use template
+                              <MaterialSymbol
+                                name="chevron_right"
+                                className="text-[16px] transition group-hover:translate-x-0.5"
+                              />
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="mx-auto flex min-w-0 w-[min(100%,70%)] flex-col gap-4 pb-2">
