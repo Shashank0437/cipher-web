@@ -135,60 +135,78 @@ async def saml_login(
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
 
+@router.get("/saml/acs")
+async def saml_acs_get() -> dict[str, str]:
+    return {
+        "detail": "SAML ACS endpoint — waits for POST from your IdP (Auth0). Do not open this URL directly in a browser.",
+    }
+
+
 @router.post("/saml/acs")
 async def saml_acs(
     request: Request,
     db: AsyncIOMotorDatabase = Depends(get_database),
 ) -> RedirectResponse:
-    form = await request.form()
-    saml_response = form.get("SAMLResponse")
-    relay_state = form.get("RelayState")
-
-    if not saml_response or not relay_state:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Missing SAML response or relay state")
-
-    relay = await load_saml_relay(str(relay_state))
-    if not relay:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid or expired SSO session")
-
-    cfg = await lookup_sso_config_for_email(db, relay["email"])
-    if not cfg:
-        await delete_saml_relay(str(relay_state))
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="SSO configuration not found")
-
-    try:
-        email, name_id = process_saml_acs(
-            cfg,
-            relay_state=str(relay_state),
-            https=_request_https(request),
-            host=request.headers.get("host") or request.url.hostname or "localhost",
-            path=request.url.path,
-            saml_response=str(saml_response),
-        )
-    except ValueError as exc:
-        logger.warning("SAML ACS validation failed: %s", exc)
-        await delete_saml_relay(str(relay_state))
-        s = get_settings()
-        err_url = f"{s.frontend_url.rstrip('/')}/login?sso_error={quote(str(exc))}"
-        return RedirectResponse(url=err_url, status_code=status.HTTP_302_FOUND)
-
-    try:
-        access_token = await issue_token_for_saml_relay(
-            db,
-            email=email,
-            name_id=name_id,
-            relay=relay,
-            sso_config=cfg,
-        )
-    except HTTPException as exc:
-        await delete_saml_relay(str(relay_state))
-        s = get_settings()
-        detail = exc.detail if isinstance(exc.detail, str) else "SSO sign-in failed"
-        err_url = f"{s.frontend_url.rstrip('/')}/login?sso_error={quote(detail)}"
-        return RedirectResponse(url=err_url, status_code=status.HTTP_302_FOUND)
-    finally:
-        await delete_saml_relay(str(relay_state))
-
     s = get_settings()
-    callback_url = f"{s.frontend_url.rstrip('/')}/auth/sso/callback?token={quote(access_token)}"
-    return RedirectResponse(url=callback_url, status_code=status.HTTP_302_FOUND)
+    frontend = s.frontend_url.rstrip("/")
+
+    def _error_redirect(message: str, *, log: Exception | str | None = None) -> RedirectResponse:
+        if log is not None:
+            logger.exception("SAML ACS error: %s", message) if isinstance(log, Exception) else logger.error(
+                "SAML ACS error: %s — %s", message, log,
+            )
+        return RedirectResponse(
+            url=f"{frontend}/login?sso_error={quote(message)}",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+    try:
+        form = await request.form()
+        saml_response = form.get("SAMLResponse")
+        relay_state = form.get("RelayState")
+
+        if not saml_response or not relay_state:
+            return _error_redirect("Missing SAML response or relay state")
+
+        relay = await load_saml_relay(str(relay_state))
+        if not relay:
+            return _error_redirect("Invalid or expired SSO session")
+
+        cfg = await lookup_sso_config_for_email(db, relay["email"])
+        if not cfg:
+            await delete_saml_relay(str(relay_state))
+            return _error_redirect("SSO configuration not found")
+
+        try:
+            email, name_id = process_saml_acs(
+                cfg,
+                relay_state=str(relay_state),
+                https=_request_https(request),
+                host=request.headers.get("host") or request.url.hostname or "localhost",
+                path=request.url.path,
+                saml_response=str(saml_response),
+            )
+        except ValueError as exc:
+            await delete_saml_relay(str(relay_state))
+            return _error_redirect(str(exc))
+
+        try:
+            access_token = await issue_token_for_saml_relay(
+                db,
+                email=email,
+                name_id=name_id,
+                relay=relay,
+                sso_config=cfg,
+            )
+        except HTTPException as exc:
+            await delete_saml_relay(str(relay_state))
+            detail = exc.detail if isinstance(exc.detail, str) else "SSO sign-in failed"
+            return _error_redirect(detail)
+        finally:
+            await delete_saml_relay(str(relay_state))
+
+        callback_url = f"{frontend}/auth/sso/callback?token={quote(access_token)}"
+        return RedirectResponse(url=callback_url, status_code=status.HTTP_302_FOUND)
+    except Exception as exc:
+        logger.exception("Unhandled SAML ACS failure")
+        return _error_redirect(f"SSO sign-in failed: {exc}")

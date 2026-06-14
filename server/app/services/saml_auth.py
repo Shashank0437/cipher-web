@@ -59,7 +59,7 @@ def build_saml_settings(sso_config: dict) -> dict[str, Any]:
             "x509cert": idp_cert,
         },
         "security": {
-            "wantAssertionsSigned": True,
+            "wantAssertionsSigned": False,
             "wantMessagesSigned": False,
             "authnRequestsSigned": bool(s.saml_sp_private_key),
         },
@@ -195,7 +195,10 @@ def process_saml_acs(
         post_data={"SAMLResponse": saml_response, "RelayState": relay_state},
     )
     auth = OneLogin_Saml2_Auth(req, settings)
-    auth.process_response()
+    try:
+        auth.process_response()
+    except Exception as exc:
+        raise ValueError(f"SAML processing error: {exc}") from exc
     errors = auth.get_errors()
     if errors:
         reason = auth.get_last_error_reason() or ""
