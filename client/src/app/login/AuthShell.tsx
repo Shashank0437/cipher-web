@@ -17,7 +17,7 @@ const labelCls = "text-[13px] font-medium text-neutral-600";
 export function AuthShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, loading, login, registerRequest } = useAuth();
+  const { user, loading, login, registerRequest, discoverSso, startSsoLogin } = useAuth();
 
   const qMode = searchParams.get("mode");
   const [mode, setMode] = useState<Mode>(qMode === "register" ? "register" : "login");
@@ -30,6 +30,10 @@ export function AuthShell() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [registerDone, setRegisterDone] = useState(false);
+  const [ssoRequired, setSsoRequired] = useState(false);
+  const [ssoAvailable, setSsoAvailable] = useState(false);
+  const [ssoProvider, setSsoProvider] = useState("");
+  const [discoveringSso, setDiscoveringSso] = useState(false);
 
   const nextRaw = searchParams.get("next");
   const safeRedirect = useMemo(() => {
@@ -48,6 +52,49 @@ export function AuthShell() {
     if (qMode === "login") setMode("login");
   }, [qMode]);
 
+  useEffect(() => {
+    const ssoError = searchParams.get("sso_error");
+    if (ssoError) {
+      setError(decodeURIComponent(ssoError));
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (mode !== "login") return;
+    const trimmed = email.trim();
+    if (!trimmed.includes("@")) {
+      setSsoRequired(false);
+      setSsoAvailable(false);
+      setSsoProvider("");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setDiscoveringSso(true);
+      void discoverSso(trimmed)
+        .then((res) => {
+          if (cancelled) return;
+          setSsoRequired(res.sso_required);
+          setSsoAvailable(res.sso_available);
+          setSsoProvider(res.provider_display_name);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSsoRequired(false);
+            setSsoAvailable(false);
+            setSsoProvider("");
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDiscoveringSso(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [email, mode, discoverSso]);
+
   if (loading || user) {
     return (
       <AuthSplitLayout>
@@ -59,6 +106,10 @@ export function AuthShell() {
   const onLogin = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (ssoRequired) {
+      startSsoLogin(email);
+      return;
+    }
     setSubmitting(true);
     try {
       await login(email, password, safeRedirect);
@@ -67,6 +118,11 @@ export function AuthShell() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const onSsoLogin = () => {
+    setError(null);
+    startSsoLogin(email);
   };
 
   const onRegister = async (e: FormEvent) => {
@@ -152,28 +208,56 @@ export function AuthShell() {
                   className={inputCls}
                 />
               </div>
-              <div>
-                <label className={labelCls} htmlFor="password">
-                  Password
-                </label>
-                <input
-                  id="password"
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className={inputCls}
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={submitting}
-                className="mt-2 h-12 w-full rounded-lg bg-neutral-900 text-[15px] font-semibold text-white transition-colors hover:bg-neutral-800 disabled:opacity-50"
-              >
-                {submitting ? "Signing in…" : "Sign in"}
-              </button>
+              {!ssoRequired ? (
+                <div>
+                  <label className={labelCls} htmlFor="password">
+                    Password
+                  </label>
+                  <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autoComplete="current-password"
+                    required={!ssoAvailable}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+              ) : null}
+              {ssoRequired ? (
+                <p className="text-[13px] leading-relaxed text-neutral-500">
+                  Your organization uses single sign-on. Continue with your corporate identity provider.
+                </p>
+              ) : null}
+              {ssoRequired ? (
+                <button
+                  type="button"
+                  onClick={onSsoLogin}
+                  disabled={discoveringSso || !email.trim()}
+                  className="mt-2 h-12 w-full rounded-lg bg-neutral-900 text-[15px] font-semibold text-white transition-colors hover:bg-neutral-800 disabled:opacity-50"
+                >
+                  {discoveringSso ? "Checking…" : `Sign in with ${ssoProvider || "SSO"}`}
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="mt-2 h-12 w-full rounded-lg bg-neutral-900 text-[15px] font-semibold text-white transition-colors hover:bg-neutral-800 disabled:opacity-50"
+                >
+                  {submitting ? "Signing in…" : "Sign in"}
+                </button>
+              )}
+              {!ssoRequired && ssoAvailable ? (
+                <button
+                  type="button"
+                  onClick={onSsoLogin}
+                  disabled={discoveringSso || !email.trim()}
+                  className="h-11 w-full rounded-lg border border-neutral-200 bg-white text-[15px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-50 disabled:opacity-50"
+                >
+                  {`Sign in with ${ssoProvider || "SSO"}`}
+                </button>
+              ) : null}
             </form>
           ) : registerDone ? (
             <div className="rounded-2xl border border-neutral-200/80 bg-neutral-50/80 px-6 py-10 text-center">

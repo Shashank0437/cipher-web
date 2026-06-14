@@ -5,6 +5,7 @@ from app.constants import (
     AGENT_CHAT_MESSAGES_COLLECTION,
     AGENT_CHAT_SESSIONS_COLLECTION,
     ORG_TOOL_POLICY_COLLECTION,
+    SSO_CONFIGS_COLLECTION,
     TOOL_EXECUTION_LOG_COLLECTION,
 )
 
@@ -54,6 +55,8 @@ async def init_db() -> None:
     )
     await db[AGENT_CHAT_MESSAGES_COLLECTION].create_index([("session_id", 1), ("created_at", 1)])
     await db[AGENT_CHAT_MESSAGES_COLLECTION].create_index([("organization_id", 1), ("user_id", 1)])
+    await db[SSO_CONFIGS_COLLECTION].create_index("domain", unique=True)
+    await db[SSO_CONFIGS_COLLECTION].create_index("organization_id", unique=True)
 
 
 async def close_db() -> None:

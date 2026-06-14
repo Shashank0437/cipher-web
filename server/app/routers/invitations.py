@@ -7,6 +7,7 @@ from app.constants import ORG_INVITE_REDIS_PREFIX
 from app.db import get_database
 from app.redis_client import get_redis
 from app.schemas.tenant import InvitationPreviewOut
+from app.services.sso_domain import lookup_sso_config_for_email, sso_discover_payload
 
 router = APIRouter(prefix="/invitations", tags=["invitations"])
 
@@ -45,9 +46,15 @@ async def preview_invitation(
     else:
         inviter_display = "A teammate"
 
+    cfg = await lookup_sso_config_for_email(db, inv["email"])
+    discover = sso_discover_payload(cfg)
+
     return InvitationPreviewOut(
         organization_name=org_name,
         inviter_display=inviter_display,
         invitee_email=inv["email"],
         invitee_username=inv["username"],
+        sso_available=discover["sso_available"],
+        sso_required=discover["sso_required"],
+        provider_display_name=discover["provider_display_name"],
     )

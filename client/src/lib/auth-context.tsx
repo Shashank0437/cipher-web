@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { api, apiPublic, clearToken, getToken, setToken } from "./api";
+import { buildSamlLoginUrl, type SsoDiscoverResult } from "./sso";
 
 export type AuthUser = {
   id: string;
@@ -38,6 +39,8 @@ type AuthContextValue = {
   registerRequest: (payload: RegisterRequestPayload) => Promise<void>;
   completeRegistration: (token: string, password: string, redirectTo?: string) => Promise<void>;
   completeInvitation: (token: string, password: string, redirectTo?: string) => Promise<void>;
+  discoverSso: (email: string) => Promise<SsoDiscoverResult>;
+  startSsoLogin: (email: string, opts?: { relay?: string; relayType?: "login" | "registration" | "invitation" }) => void;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -115,6 +118,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [refreshUser, router],
   );
 
+  const discoverSso = useCallback(async (email: string) => {
+    const q = encodeURIComponent(email.trim());
+    return apiPublic<SsoDiscoverResult>(`/auth/sso/discover?email=${q}`);
+  }, []);
+
+  const startSsoLogin = useCallback(
+    (email: string, opts?: { relay?: string; relayType?: "login" | "registration" | "invitation" }) => {
+      window.location.assign(
+        buildSamlLoginUrl({
+          email,
+          relay: opts?.relay,
+          relayType: opts?.relayType ?? "login",
+        }),
+      );
+    },
+    [],
+  );
+
   const logout = useCallback(() => {
     clearToken();
     setUser(null);
@@ -143,6 +164,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       registerRequest,
       completeRegistration,
       completeInvitation,
+      discoverSso,
+      startSsoLogin,
     }),
     [
       user,
@@ -154,6 +177,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       registerRequest,
       completeRegistration,
       completeInvitation,
+      discoverSso,
+      startSsoLogin,
     ],
   );
 

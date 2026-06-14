@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import close_db, init_db
 from app.redis_client import close_redis
-from app.routers import admin, agent_chat, auth, contact, invitations, tenant, workspace_tools
+from app.routers import admin, agent_chat, auth, contact, invitations, sso, tenant, workspace_tools
 
 
 @asynccontextmanager
@@ -31,6 +31,7 @@ if origins:
     )
 
 app.include_router(auth.router)
+app.include_router(sso.router)
 app.include_router(tenant.router)
 app.include_router(invitations.router)
 app.include_router(admin.router)

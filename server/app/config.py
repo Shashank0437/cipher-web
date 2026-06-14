@@ -51,6 +51,17 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000"
 
+    # Public API base URL for SAML SP endpoints (ACS, metadata). IdP redirects here.
+    api_base_url: str = Field(
+        default="http://localhost:8000",
+        validation_alias=AliasChoices("API_BASE_URL"),
+    )
+    saml_sp_entity_id: str = ""
+    saml_acs_url: str = ""
+    saml_sp_private_key: str = ""
+    saml_sp_x509_cert: str = ""
+    saml_relay_ttl_seconds: int = 600
+
     # NyxStrike agent (Flask) — proxied for workspace tools UI. Not exposed to browsers directly.
     agent_base_url: str = Field(
         default="http://127.0.0.1:8888",

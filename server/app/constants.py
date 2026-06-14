@@ -2,6 +2,9 @@
 
 REG_COMPLETE_REDIS_PREFIX = "cipherstrike:reg_complete:"
 ORG_INVITE_REDIS_PREFIX = "cipherstrike:org_invite:"
+SAML_RELAY_REDIS_PREFIX = "cipherstrike:saml_relay:"
+
+SSO_CONFIGS_COLLECTION = "sso_configs"
 
 ORG_TOOL_POLICY_COLLECTION = "organization_tool_policy"
 TOOL_EXECUTION_LOG_COLLECTION = "tool_execution_log"

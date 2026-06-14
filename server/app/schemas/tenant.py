@@ -21,3 +21,6 @@ class InvitationPreviewOut(BaseModel):
     inviter_display: str
     invitee_email: str
     invitee_username: str
+    sso_available: bool = False
+    sso_required: bool = False
+    provider_display_name: str = ""

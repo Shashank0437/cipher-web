@@ -22,6 +22,7 @@ from app.schemas.auth import (
 from app.services.jwt_tokens import create_access_token
 from app.services.password import hash_password, verify_password
 from app.services.slug import unique_organization_slug
+from app.services.sso_domain import lookup_sso_config_for_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,6 +30,22 @@ PENDING = "pending"
 APPROVED = "approved"
 COMPLETED = "completed"
 REJECTED = "rejected"
+
+
+async def _reject_if_sso_enforced(
+    db: AsyncIOMotorDatabase,
+    email: str,
+    *,
+    action: str,
+    status_code: int = status.HTTP_403_FORBIDDEN,
+) -> None:
+    cfg = await lookup_sso_config_for_email(db, email)
+    if cfg and cfg.get("enforced"):
+        provider = cfg.get("provider_display_name") or cfg.get("domain") or "your organization"
+        raise HTTPException(
+            status_code,
+            detail=f"Password {action} is disabled for this domain. Sign in with {provider} instead.",
+        )
 
 
 @router.post("/register-request", status_code=status.HTTP_201_CREATED)
@@ -93,6 +110,13 @@ async def complete_registration(
     if await db.users.find_one({"email": email_norm}):
         await r.delete(key)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="An account with this email already exists")
+
+    await _reject_if_sso_enforced(db, email_norm, action="registration", status_code=status.HTTP_400_BAD_REQUEST)
+    if req.get("organization_id"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="This registration must be completed via SSO. Use the activation link from your email.",
+        )
 
     company = req["company_name"]
     slug = await unique_organization_slug(db, company)
@@ -181,6 +205,13 @@ async def complete_invitation(
             detail="An account with this email already exists. Sign in instead.",
         )
 
+    await _reject_if_sso_enforced(
+        db,
+        email_norm,
+        action="invitation acceptance",
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )
+
     roles = list(inv.get("roles") or ["tenant_member"])
     pwd_hash = hash_password(body.password)
     now = datetime.now(UTC)
@@ -221,8 +252,22 @@ async def complete_invitation(
 @router.post("/login", response_model=TokenOut)
 async def login(body: LoginIn, db: AsyncIOMotorDatabase = Depends(get_database)) -> TokenOut:
     email_norm = body.email.lower().strip()
+    await _reject_if_sso_enforced(db, email_norm, action="sign-in")
+
     user = await db.users.find_one({"email": email_norm})
-    if not user or not verify_password(body.password, user["password_hash"]):
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+
+    pwd_hash = user.get("password_hash")
+    if not pwd_hash:
+        cfg = await lookup_sso_config_for_email(db, email_norm)
+        provider = (cfg or {}).get("provider_display_name") or "your organization SSO"
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=f"This account uses SSO only. Sign in with {provider}.",
+        )
+
+    if not verify_password(body.password, pwd_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
     oid = user["_id"]
@@ -283,7 +328,14 @@ async def change_password(
     user: dict = Depends(require_auth_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ) -> dict[str, str]:
-    if not verify_password(body.current_password, user["password_hash"]):
+    pwd_hash = user.get("password_hash")
+    if not pwd_hash:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="This account uses SSO only and does not have a password to change.",
+        )
+
+    if not verify_password(body.current_password, pwd_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
 
     if body.current_password == body.new_password:
