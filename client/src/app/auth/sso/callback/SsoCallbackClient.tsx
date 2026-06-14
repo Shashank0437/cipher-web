@@ -13,14 +13,15 @@ export function SsoCallbackClient() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const token = searchParams.get("token")?.trim();
-    if (!token) {
+    const raw = searchParams.get("token")?.trim();
+    if (!raw) {
       setError("Missing sign-in token. Try signing in again.");
       return;
     }
+    const accessToken = raw;
     let cancelled = false;
     async function finish() {
-      setToken(token);
+      setToken(accessToken);
       try {
         await refreshUser();
         if (!cancelled) router.replace("/dashboard");
