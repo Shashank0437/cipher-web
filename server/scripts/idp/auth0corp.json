@@ -1,0 +1,7 @@
+{
+  "provider_display_name": "auth0corp",
+  "enforced": true,
+  "idp_entity_id": "urn:dev-kshashank.us.auth0.com",
+  "idp_sso_url": "https://dev-kshashank.us.auth0.com/samlp/BIA5t8nHNMsgQClMA8OnJXmIeOPFQ0tM",
+  "idp_cert_file": "auth0corp.pem"
+}

@@ -4,17 +4,16 @@ Provision an organization + SSO config for an enterprise domain and link a pendi
 
 Usage:
   python scripts/setup_sso_org.py \\
-    --org-name "ABCD CORP" \\
-    --domain ril.com \\
-    --request-id 674a1b2c3d4e5f6789012345 \\
-    --provider-display-name "ABCD CORP" \\
-    --idp-entity-id "https://idp.example.com/metadata" \\
-    --idp-sso-url "https://idp.example.com/sso" \\
-    --idp-cert-file /path/to/idp.pem
+    --org-name auth0corp \\
+    --domain robot-mail.com \\
+    --find-by-domain \\
+    --config-file scripts/idp/auth0corp.json
 
-  # Or load IdP settings from JSON:
-  python scripts/setup_sso_org.py --org-name "ABCD CORP" --domain ril.com \\
-    --request-id 674a... --config-file sso_idp.json
+  python scripts/setup_sso_org.py \\
+    --org-name auth0corp \\
+    --domain robot-mail.com \\
+    --request-id 674a1b2c3d4e5f6789012345 \\
+    --config-file scripts/idp/auth0corp.json
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Allow running from server/ or repo root
 _SERVER_ROOT = Path(__file__).resolve().parent.parent
 if str(_SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(_SERVER_ROOT))
@@ -42,18 +40,56 @@ from app.services.sso_domain import extract_email_domain, normalize_domain  # no
 
 
 def _load_idp_cert(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent / "idp" / p.name if p.parent == Path(".") else _SERVER_ROOT / path
+        if not p.exists():
+            p = Path(path)
+    return p.read_text(encoding="utf-8").strip()
 
 
 def _load_config_file(path: str) -> dict:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    cfg_path = Path(path)
+    if not cfg_path.is_absolute():
+        candidate = Path(__file__).resolve().parent / path
+        if candidate.exists():
+            cfg_path = candidate
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cert_ref = data.get("idp_cert_file")
+    if cert_ref and not data.get("idp_x509_cert"):
+        cert_path = cfg_path.parent / cert_ref
+        data["idp_x509_cert"] = cert_path.read_text(encoding="utf-8").strip()
     required = ("idp_entity_id", "idp_sso_url", "idp_x509_cert")
     missing = [k for k in required if not data.get(k)]
     if missing:
         raise ValueError(f"config-file missing fields: {', '.join(missing)}")
-    if data.get("idp_cert_file") and not data.get("idp_x509_cert"):
-        data["idp_x509_cert"] = _load_idp_cert(data["idp_cert_file"])
     return data
+
+
+async def _resolve_request_id(db, args: argparse.Namespace, domain: str) -> ObjectId | None:
+    if args.request_id:
+        try:
+            return ObjectId(args.request_id)
+        except InvalidId:
+            print(f"error: invalid request-id: {args.request_id}", file=sys.stderr)
+            return None
+
+    if not args.find_by_domain:
+        print("error: provide --request-id or --find-by-domain", file=sys.stderr)
+        return None
+
+    cursor = db.registration_requests.find({"status": "pending"}).sort("created_at", -1)
+    async for req in cursor:
+        if extract_email_domain(req.get("email", "")) == domain:
+            print(f"Found pending registration request: {req['_id']} ({req['email']})")
+            return req["_id"]
+
+    print(
+        f"error: no pending registration request found for domain '{domain}'. "
+        f"Submit a trial request first with an email @{domain}",
+        file=sys.stderr,
+    )
+    return None
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -61,12 +97,6 @@ async def run(args: argparse.Namespace) -> int:
     domain = normalize_domain(args.domain)
     if not domain:
         print("error: invalid domain", file=sys.stderr)
-        return 1
-
-    try:
-        request_oid = ObjectId(args.request_id)
-    except InvalidId:
-        print(f"error: invalid request-id: {args.request_id}", file=sys.stderr)
         return 1
 
     if args.config_file:
@@ -90,9 +120,13 @@ async def run(args: argparse.Namespace) -> int:
     db = client[settings.mongodb_db]
 
     try:
+        request_oid = await _resolve_request_id(db, args, domain)
+        if not request_oid:
+            return 1
+
         req = await db.registration_requests.find_one({"_id": request_oid})
         if not req:
-            print(f"error: registration request not found: {args.request_id}", file=sys.stderr)
+            print(f"error: registration request not found: {request_oid}", file=sys.stderr)
             return 1
 
         if req.get("status") != "pending":
@@ -151,6 +185,7 @@ async def run(args: argparse.Namespace) -> int:
 
         api_base = settings.api_base_url.rstrip("/")
         metadata_url = f"{api_base}/auth/saml/metadata"
+        acs_url = f"{api_base}/auth/saml/acs"
 
         print("SSO organization provisioned successfully.")
         print(f"  organization_id: {org_id}")
@@ -160,9 +195,14 @@ async def run(args: argparse.Namespace) -> int:
         print(f"  enforced: {enforced}")
         print(f"  registration_request_id: {request_oid}")
         print(f"  SP metadata URL: {metadata_url}")
+        print(f"  SP ACS URL (Auth0 callback): {acs_url}")
+        print()
+        print("Auth0 SAML app settings:")
+        print(f"  Callback URL: {acs_url}")
+        print(f"  Audience / Identifier: {metadata_url}")
         print()
         print("Next steps:")
-        print("  1. Configure your IdP with the SP metadata URL above.")
+        print("  1. Configure Auth0 SAML app with the Callback URL and Audience above.")
         print("  2. Approve the registration request:")
         print(f"     POST {api_base}/admin/registration-requests/{request_oid}/approve")
         print("     Header: X-Admin-Key: <your admin key>")
@@ -175,9 +215,14 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Provision org + SSO config for enterprise onboarding")
     parser.add_argument("--org-name", required=True, help="Organization display name")
-    parser.add_argument("--domain", required=True, help="Email domain e.g. ril.com")
-    parser.add_argument("--request-id", required=True, help="registration_requests ObjectId")
-    parser.add_argument("--provider-display-name", default="", help="Button label e.g. ABCD CORP")
+    parser.add_argument("--domain", required=True, help="Email domain e.g. robot-mail.com")
+    parser.add_argument("--request-id", default="", help="registration_requests ObjectId")
+    parser.add_argument(
+        "--find-by-domain",
+        action="store_true",
+        help="Auto-find latest pending registration request for --domain",
+    )
+    parser.add_argument("--provider-display-name", default="", help="Button label e.g. auth0corp")
     parser.add_argument("--idp-entity-id", default="", help="SAML IdP entity ID")
     parser.add_argument("--idp-sso-url", default="", help="SAML IdP SSO URL")
     parser.add_argument("--idp-cert-file", default="", help="Path to IdP X.509 certificate PEM")
