@@ -39,25 +39,35 @@ from app.services.slug import unique_organization_slug  # noqa: E402
 from app.services.sso_domain import extract_email_domain, normalize_domain  # noqa: E402
 
 
-def _load_idp_cert(path: str) -> str:
+def _resolve_path(path: str) -> Path:
     p = Path(path)
-    if not p.is_absolute():
-        p = Path(__file__).resolve().parent / "idp" / p.name if p.parent == Path(".") else _SERVER_ROOT / path
-        if not p.exists():
-            p = Path(path)
-    return p.read_text(encoding="utf-8").strip()
+    if p.is_absolute() and p.exists():
+        return p
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        p,
+        script_dir / p,
+        script_dir.parent / p,
+        _SERVER_ROOT / p,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return p
+
+
+def _load_idp_cert(path: str) -> str:
+    return _resolve_path(path).read_text(encoding="utf-8").strip()
 
 
 def _load_config_file(path: str) -> dict:
-    cfg_path = Path(path)
-    if not cfg_path.is_absolute():
-        candidate = Path(__file__).resolve().parent / path
-        if candidate.exists():
-            cfg_path = candidate
+    cfg_path = _resolve_path(path)
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"config file not found: {path}")
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
     cert_ref = data.get("idp_cert_file")
     if cert_ref and not data.get("idp_x509_cert"):
-        cert_path = cfg_path.parent / cert_ref
+        cert_path = _resolve_path(str(cfg_path.parent / cert_ref))
         data["idp_x509_cert"] = cert_path.read_text(encoding="utf-8").strip()
     required = ("idp_entity_id", "idp_sso_url", "idp_x509_cert")
     missing = [k for k in required if not data.get(k)]
